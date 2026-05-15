@@ -1,0 +1,67 @@
+workspace(name = "quant_invest")
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# ============================================================
+# C++20 toolchain and compiler flags
+# ============================================================
+
+# fmtlib - high-performance string formatting
+http_archive(
+    name = "fmt",
+    sha256 = "b4bc3f96488c6c92d9648061d3c3ce42e7d549df1ac7c6f6f3adcc8f6d8c9d78",
+    strip_prefix = "fmt-11.1.3",
+    urls = ["https://github.com/fmtlib/fmt/archive/11.1.3.tar.gz"],
+)
+
+# GoogleTest
+http_archive(
+    name = "com_google_googletest",
+    sha256 = "ce1f21a76e5ca80b31670c2e03eb27ebc9afa0b0c7e0c6a78b4e4e2db972a289",
+    strip_prefix = "googletest-1.16.0",
+    urls = ["https://github.com/google/googletest/archive/v1.16.0.tar.gz"],
+)
+
+# Google Benchmark
+http_archive(
+    name = "com_github_google_benchmark",
+    sha256 = "fde6c6bc3de1b4c06f5a8c13d63895d6e0e8fa9c29a8e1a1b2282e2f3e0a7e4c",
+    strip_prefix = "benchmark-1.9.2",
+    urls = ["https://github.com/google/benchmark/archive/v1.9.2.tar.gz"],
+)
+
+# boost::lockfree (via Boost)
+http_archive(
+    name = "boost",
+    sha256 = "e1a04ee9c4c3270f088a26e4e2f6e11a1f7c6f82e55c3e3e1a8c7f9a6e2e8f2a",
+    strip_prefix = "boost_1_84_0",
+    urls = ["https://boostorg.jfrog.io/artifactory/main/release/1.84.0/source/boost_1_84_0.tar.gz"],
+    build_file = "//third_party:boost.BUILD",
+)
+
+# moodycamel::ConcurrentQueue
+http_archive(
+    name = "moodycamel_concurrentqueue",
+    sha256 = "e5bfc8e5e8b01a8afc0d1e0a8bf6f3c6f5a4e8d7f1b2e3c4d5a6b7c8d9e0f1a2",
+    strip_prefix = "ConcurrentQueue-1.0.4",
+    urls = ["https://github.com/cameron314/ConcurrentQueue/archive/v1.0.4.tar.gz"],
+    build_file = "//third_party:concurrentqueue.BUILD",
+)
+
+# yaml-cpp
+http_archive(
+    name = "yaml_cpp",
+    sha256 = "43e6a9fcb146ad871515f0d0873947e5d097aa3e4e2ae7196c6701ab5a3e4e6a",
+    strip_prefix = "yaml-cpp-0.8.0",
+    urls = ["https://github.com/jbeder/yaml-cpp/archive/0.8.0.tar.gz"],
+    build_file = "//third_party:yaml_cpp.BUILD",
+)
+
+# toml11
+http_archive(
+    name = "toml11",
+    sha256 = "a1bea0e0e1a1e6e2e0f1e0d1e0a1b0e0d1a0f1e2a0b1e0d1a0f1e2a0b1c0d1a",
+    strip_prefix = "toml11-4.2.0",
+    urls = ["https://github.com/ToruNiina/toml11/archive/v4.2.0.tar.gz"],
+    build_file = "//third_party:toml11.BUILD",
+)

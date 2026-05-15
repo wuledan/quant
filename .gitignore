@@ -30,4 +30,8 @@ node_modules/
 *.iml
 .clangd/
 compile_commands.json
-.cache/
+.cache/build/
+bazel-*
+*.o
+*.a
+*.so
