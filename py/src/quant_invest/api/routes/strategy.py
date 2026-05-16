@@ -14,6 +14,18 @@ async def list_strategies():
     return {"strategies": []}
 
 
+@router.post("/start")
+async def start_strategy(strategy_id: str):
+    """启动策略."""
+    return {"strategy_id": strategy_id, "status": "running"}
+
+
+@router.post("/stop")
+async def stop_strategy(strategy_id: str):
+    """停止策略."""
+    return {"strategy_id": strategy_id, "status": "stopped"}
+
+
 @router.get("/{strategy_id}")
 async def get_strategy(strategy_id: str):
     """策略详情."""

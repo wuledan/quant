@@ -49,6 +49,24 @@ add_library(quant_event
 target_include_directories(quant_event PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_event PUBLIC quant_infra)
 
+# ── storage library ──
+add_library(quant_storage
+    cpp/quant/storage/column_block.cc
+    cpp/quant/storage/time_series_cache.cc
+    cpp/quant/storage/time_series_store.cc
+    cpp/quant/storage/disk_persistence.cc
+)
+target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_storage PUBLIC quant_event)
+
+# ── execution library ──
+add_library(quant_execution
+    cpp/quant/execution/order_state_machine.cc
+    cpp/quant/execution/order_manager.cc
+)
+target_include_directories(quant_execution PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_execution PUBLIC quant_infra)
+
 # ── Tests ──
 include(FetchContent)
 FetchContent_Declare(

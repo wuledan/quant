@@ -131,12 +131,6 @@ private:
 // ── QuantMemoryResource::Impl ──
 class QuantMemoryResource::Impl {
 public:
-    struct ManagedBlock {
-        void* ptr;
-        size_t capacity;
-        size_t used;
-    };
-
     explicit Impl(const SmallObjectConfig& cfg)
         : config_(cfg)
         , small_free_lists_{}
@@ -146,8 +140,15 @@ public:
             small_free_lists_[i] = std::make_unique<SizeClassFreeList>();
         }
         // Pre-allocate initial blocks
-        for (auto& block : preallocated_blocks_) {
-            block = alloc_block();
+        constexpr size_t kInitialBlocks = 4;
+        for (size_t i = 0; i < kInitialBlocks; ++i) {
+            preallocated_blocks_.push_back(alloc_block());
+        }
+        // Initialize bump allocator from first block
+        if (!preallocated_blocks_.empty()) {
+            bump_block_ptr_ = preallocated_blocks_[0];
+            bump_block_idx_ = 0;
+            bump_offset_ = 0;
         }
     }
 

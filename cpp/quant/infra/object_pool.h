@@ -33,22 +33,12 @@ public:
     using Config = ObjectPoolConfig<T>;
 
     explicit ObjectPool(const Config& cfg = {})
-        : config_(cfg)
+        : impl_(std::make_shared<Impl>(cfg))
     {
         warmup(cfg.initial_capacity);
     }
 
-    ~ObjectPool() {
-        // Destroy all allocated objects
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (size_t i = 0; i < objects_.size(); ++i) {
-            objects_[i]->~T();
-        }
-        // Free raw memory blocks
-        for (auto* block : blocks_) {
-            ::operator delete(block);
-        }
-    }
+    ~ObjectPool() = default;
 
     // Disable copy
     ObjectPool(const ObjectPool&) = delete;
@@ -56,44 +46,47 @@ public:
 
     // ── Acquire an object ──
     std::shared_ptr<T> acquire() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
 
         // Check if we need to grow
-        if (free_list_.empty()) {
-            if (config_.max_capacity > 0 && capacity_ >= config_.max_capacity) {
+        if (impl_->free_list_.empty()) {
+            if (impl_->config_.max_capacity > 0 && impl_->capacity_ >= impl_->config_.max_capacity) {
                 return nullptr;  // Pool exhausted
             }
-            grow(config_.grow_factor * config_.initial_capacity);
+            impl_->grow(impl_->config_.grow_factor * impl_->config_.initial_capacity);
         }
 
-        assert(!free_list_.empty());
-        size_t idx = free_list_.back();
-        free_list_.pop_back();
+        assert(!impl_->free_list_.empty());
+        size_t idx = impl_->free_list_.back();
+        impl_->free_list_.pop_back();
 
         // Reset and construct the object
-        T* obj = objects_[idx];
+        T* obj = impl_->objects_[idx];
         obj->reset();
 
-        stats_.acquire_count.fetch_add(1, std::memory_order_relaxed);
-        size_t in_use = in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
+        impl_->stats_.acquire_count.fetch_add(1, std::memory_order_relaxed);
+        size_t in_use = impl_->in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
 
         // Update peak
-        size_t peak = peak_in_use_.load(std::memory_order_relaxed);
+        size_t peak = impl_->peak_in_use_.load(std::memory_order_relaxed);
         while (in_use > peak) {
-            if (peak_in_use_.compare_exchange_weak(peak, in_use,
+            if (impl_->peak_in_use_.compare_exchange_weak(peak, in_use,
                     std::memory_order_relaxed)) {
                 break;
             }
         }
 
-        available_.store(free_list_.size(), std::memory_order_release);
+        impl_->available_.store(impl_->free_list_.size(), std::memory_order_release);
 
-        // Create shared_ptr with custom deleter that returns to pool
-        // Capture 'this' and idx for the deleter
-        auto* pool = this;
-        return std::shared_ptr<T>(obj, [pool, idx](T* p) {
+        // Create shared_ptr with custom deleter that returns to pool.
+        // Captures weak_ptr<Impl> to safely handle pool destruction before
+        // all shared_ptrs are released, avoiding use-after-free.
+        std::weak_ptr<Impl> weak = impl_;
+        return std::shared_ptr<T>(obj, [weak, idx](T* p) {
             p->reset();
-            pool->return_object(idx);
+            if (auto impl = weak.lock()) {
+                impl->return_object(idx);
+            }
         });
     }
 
@@ -111,8 +104,8 @@ public:
 
     // ── Warmup ──
     void warmup(size_t count) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        grow(count);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
+        impl_->grow(count);
     }
 
     // ── Stats ──
@@ -126,80 +119,93 @@ public:
     };
 
     Stats stats() const noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(impl_->mutex_);
         Stats s;
-        s.total_allocated = capacity_;
-        s.total_in_use = in_use_.load(std::memory_order_relaxed);
-        s.total_available = free_list_.size();
-        s.peak_in_use = peak_in_use_.load(std::memory_order_relaxed);
-        s.acquire_count = stats_.acquire_count.load(std::memory_order_relaxed);
-        s.release_count = stats_.release_count.load(std::memory_order_relaxed);
+        s.total_allocated = impl_->capacity_;
+        s.total_in_use = impl_->in_use_.load(std::memory_order_relaxed);
+        s.total_available = impl_->free_list_.size();
+        s.peak_in_use = impl_->peak_in_use_.load(std::memory_order_relaxed);
+        s.acquire_count = impl_->stats_.acquire_count.load(std::memory_order_relaxed);
+        s.release_count = impl_->stats_.release_count.load(std::memory_order_relaxed);
         return s;
     }
 
     // ── Shrink ──
-    void shrink_to_fit() {
-        // Not implemented for safety — could corrupt in-use indices
-    }
+    void shrink_to_fit() {}
 
     // ── Capacity ──
-    size_t capacity() const noexcept { return capacity_; }
-    size_t available() const noexcept { return available_.load(std::memory_order_relaxed); }
+    size_t capacity() const noexcept { return impl_->capacity_; }
+    size_t available() const noexcept { return impl_->available_.load(std::memory_order_relaxed); }
 
 private:
-    // Return object to pool (called by shared_ptr deleter)
-    void return_object(size_t idx) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        free_list_.push_back(idx);
-        in_use_.fetch_sub(1, std::memory_order_relaxed);
-        stats_.release_count.fetch_add(1, std::memory_order_relaxed);
-        available_.store(free_list_.size(), std::memory_order_release);
-    }
+    struct Impl {
+        explicit Impl(const Config& cfg) : config_(cfg) {}
 
-    // Allocate new objects and add to free list
-    void grow(size_t count) {
-        // Must be called with mutex held
-        size_t old_capacity = capacity_;
-        capacity_ += count;
-
-        // Allocate a new block of raw memory
-        constexpr size_t obj_size = sizeof(T);
-        constexpr size_t obj_align = alignof(T);
-        size_t block_size = count * obj_size + obj_align;
-
-        char* block = static_cast<char*>(::operator new(block_size));
-        blocks_.push_back(block);
-
-        // Align pointer
-        uintptr_t addr = reinterpret_cast<uintptr_t>(block);
-        addr = (addr + obj_align - 1) & ~(obj_align - 1);
-        char* aligned = reinterpret_cast<char*>(addr);
-
-        for (size_t i = 0; i < count; ++i) {
-            T* obj = ::new (aligned + i * obj_size) T();
-            objects_.push_back(obj);
-            free_list_.push_back(old_capacity + i);
+        ~Impl() {
+            // Destroy all allocated objects
+            for (size_t i = 0; i < objects_.size(); ++i) {
+                objects_[i]->~T();
+            }
+            // Free raw memory blocks
+            for (auto* block : blocks_) {
+                ::operator delete(block);
+            }
         }
-    }
 
-    Config config_;
-    size_t capacity_ = 0;
+        // Return object to pool (called by shared_ptr deleter)
+        void return_object(size_t idx) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            free_list_.push_back(idx);
+            in_use_.fetch_sub(1, std::memory_order_relaxed);
+            stats_.release_count.fetch_add(1, std::memory_order_relaxed);
+            available_.store(free_list_.size(), std::memory_order_release);
+        }
 
-    std::vector<T*> objects_;             // Pointers to constructed objects
-    std::vector<size_t> free_list_;       // Available indices
-    std::vector<char*> blocks_;           // Raw memory blocks for freeing
+        // Allocate new objects and add to free list
+        void grow(size_t count) {
+            size_t old_capacity = capacity_;
+            capacity_ += count;
 
-    std::atomic<size_t> available_{0};
-    std::atomic<size_t> in_use_{0};
-    std::atomic<size_t> peak_in_use_{0};
+            constexpr size_t obj_size = sizeof(T);
+            constexpr size_t obj_align = alignof(T);
+            size_t block_size = count * obj_size + obj_align;
 
-    struct AtomicStats {
-        std::atomic<uint64_t> acquire_count{0};
-        std::atomic<uint64_t> release_count{0};
+            char* block = static_cast<char*>(::operator new(block_size));
+            blocks_.push_back(block);
+
+            // Align pointer
+            uintptr_t addr = reinterpret_cast<uintptr_t>(block);
+            addr = (addr + obj_align - 1) & ~(obj_align - 1);
+            char* aligned = reinterpret_cast<char*>(addr);
+
+            for (size_t i = 0; i < count; ++i) {
+                T* obj = ::new (aligned + i * obj_size) T();
+                objects_.push_back(obj);
+                free_list_.push_back(old_capacity + i);
+            }
+        }
+
+        Config config_;
+        size_t capacity_ = 0;
+
+        std::vector<T*> objects_;
+        std::vector<size_t> free_list_;
+        std::vector<char*> blocks_;
+
+        std::atomic<size_t> available_{0};
+        std::atomic<size_t> in_use_{0};
+        std::atomic<size_t> peak_in_use_{0};
+
+        struct AtomicStats {
+            std::atomic<uint64_t> acquire_count{0};
+            std::atomic<uint64_t> release_count{0};
+        };
+        AtomicStats stats_;
+
+        mutable std::mutex mutex_;
     };
-    AtomicStats stats_;
 
-    mutable std::mutex mutex_;
+    std::shared_ptr<Impl> impl_;
 };
 
 // ── Typical usage example ──

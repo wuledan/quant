@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from ..backtest.events import SignalEvent
+from ..backtest.events import FillEvent, SignalEvent
 
 
 @dataclass

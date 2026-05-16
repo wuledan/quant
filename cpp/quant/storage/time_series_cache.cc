@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 
 namespace quant::storage {
 
@@ -14,7 +15,7 @@ TimeSeriesCache::TimeSeriesCache(size_t memory_budget_mb)
 }
 
 void TimeSeriesCache::append(std::string_view symbol,
-                               DataType type,
+                               quant::event::DataType type,
                                ColumnBlock block) {
     size_t idx = shard_index(symbol);
     auto& shard = *shards_[idx];
@@ -35,7 +36,7 @@ void TimeSeriesCache::append(std::string_view symbol,
 
 std::vector<ColumnBlock> TimeSeriesCache::query(
     std::string_view symbol,
-    DataType type,
+    quant::event::DataType type,
     DataField field,
     TimeRange range) const {
     size_t idx = shard_index(symbol);
@@ -69,7 +70,7 @@ std::vector<ColumnBlock> TimeSeriesCache::query(
     return result;
 }
 
-void TimeSeriesCache::evict(std::string_view symbol, DataType type) {
+void TimeSeriesCache::evict(std::string_view symbol, quant::event::DataType type) {
     size_t idx = shard_index(symbol);
     auto& shard = *shards_[idx];
 
@@ -79,10 +80,10 @@ void TimeSeriesCache::evict(std::string_view symbol, DataType type) {
         std::unique_lock lock(shard.rwlock);
         auto it = shard.columns.find(key);
         if (it != shard.columns.end()) {
-            size_t freed = shard.memory_used;
+            size_t before = shard.memory_used;
             shard.columns.erase(it);
             shard.last_access.erase(key);
-            freed -= shard.memory_used;
+            size_t freed = before - shard.memory_used;
             total_memory_.fetch_sub(freed, std::memory_order_relaxed);
         }
     }

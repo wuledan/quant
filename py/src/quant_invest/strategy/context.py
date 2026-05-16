@@ -10,8 +10,12 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .factor_api import FactorAPI
 
 
 class StrategyContext:

@@ -3,6 +3,10 @@
 from .base import StrategyBase, StrategyParams
 from .factor_api import FactorAPI
 from .registry import StrategyRegistry
+from .base import StrategyBase, StrategyParams
+from .factor_api import FactorAPI
+from .position_sizer import PositionSizer
+from .registry import StrategyRegistry
 from .signal import SignalGenerator
 
 __all__ = [
@@ -11,4 +15,5 @@ __all__ = [
     "SignalGenerator",
     "FactorAPI",
     "StrategyRegistry",
+    "PositionSizer",
 ]
