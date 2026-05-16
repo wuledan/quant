@@ -111,28 +111,75 @@ void ConfigManager::hot_reload_loop() {
         std::this_thread::sleep_for(poll_interval_);
 
         std::unique_lock lock(mutex_);
-        for (auto& src : global_sources_) {
-            std::map<std::string, ConfigValue> fresh;
-            if (src->load(fresh)) {
-                for (const auto& [key, val] : fresh) {
-                    auto it = global_config_.find(key);
-                    if (it != global_config_.end() && it->second != val) {
-                        ConfigChangeEvent event{
-                            .key = key,
-                            .old_value = it->second,
-                            .new_value = val,
-                            .level = ConfigLevel::kGlobal,
-                            .source = "hot_reload",
-                        };
-                        it->second = val;
-                        lock.unlock();
-                        notify_change(event);
-                        lock.lock();
-                    }
-                }
-            }
+        reload_sources(global_sources_, global_config_, ConfigLevel::kGlobal, lock);
+        reload_sources(module_sources_, module_config_, ConfigLevel::kModule, lock);
+        reload_sources(strategy_sources_, strategy_config_, ConfigLevel::kStrategy, lock);
+    }
+}
+
+void ConfigManager::reload_sources(
+    std::vector<std::unique_ptr<ConfigSource>>& sources,
+    std::map<std::string, ConfigValue>& config,
+    ConfigLevel level,
+    std::unique_lock<std::shared_mutex>>& lock) {
+    if (sources.empty()) return;
+
+    auto old_config = config;
+    for (auto& source : sources) {
+        source->load(config);
+    }
+    lock.unlock();
+
+    // Notify new/modified keys
+    for (const auto& [key, new_val] : config) {
+        auto old_it = old_config.find(key);
+        if (old_it == old_config.end()) {
+            notify_change({key, ConfigValue{}, new_val, level, "hot_reload"});
+        } else if (old_it->second != new_val) {
+            notify_change({key, old_it->second, new_val, level, "hot_reload"});
         }
     }
+    // Notify removed keys
+    for (const auto& [key, old_val] : old_config) {
+        if (config.find(key) == config.end()) {
+            notify_change({key, old_val, ConfigValue{}, level, "hot_reload"});
+        }
+    }
+
+    lock.lock();
+}
+
+void ConfigManager::reload_sources(
+    std::unordered_map<std::string,
+        std::vector<std::unique_ptr<ConfigSource>>>& sources_map,
+    std::map<std::string, ConfigValue>& config,
+    ConfigLevel level,
+    std::unique_lock<std::shared_mutex>>& lock) {
+    if (sources_map.empty()) return;
+
+    auto old_config = config;
+    for (auto& [key, sources] : sources_map) {
+        for (auto& source : sources) {
+            source->load(config);
+        }
+    }
+    lock.unlock();
+
+    for (const auto& [key, new_val] : config) {
+        auto old_it = old_config.find(key);
+        if (old_it == old_config.end()) {
+            notify_change({key, ConfigValue{}, new_val, level, "hot_reload"});
+        } else if (old_it->second != new_val) {
+            notify_change({key, old_it->second, new_val, level, "hot_reload"});
+        }
+    }
+    for (const auto& [key, old_val] : old_config) {
+        if (config.find(key) == config.end()) {
+            notify_change({key, old_val, ConfigValue{}, level, "hot_reload"});
+        }
+    }
+
+    lock.lock();
 }
 
 std::map<std::string, ConfigValue> ConfigManager::export_all() const {

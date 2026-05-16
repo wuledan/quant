@@ -31,15 +31,11 @@ public:
         size_t subscriber_shard_count = 64;
         size_t history_buffer_size = 1024;
         bool   enable_profiling = false;
-
-        Options() = default;
-        Options(size_t ssc, size_t hbs, bool ep)
-            : subscriber_shard_count(ssc)
-            , history_buffer_size(hbs)
-            , enable_profiling(ep) {}
     };
 
-    explicit EventBus(const Options& opts = Options{});
+    static Options default_options() { return Options{}; }
+
+    explicit EventBus(const Options& opts);
     ~EventBus();
 
     // Disable copy/move

@@ -1,9 +1,11 @@
+#!/usr/bin/env python3
 """持仓管理"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 
@@ -34,7 +36,7 @@ class Portfolio:
         self.initial_cash: float = 0.0
         self.cash: float = 0.0
         self.positions: dict[str, Position] = {}
-        self._nav_history: list[dict] = []
+        self._nav_history: list[dict[str, Any]] = []
 
     def initialize(self, initial_cash: float) -> None:
         """初始化组合"""
@@ -56,21 +58,125 @@ class Portfolio:
         signals: list[SignalEvent],
         market_event: MarketEvent,
     ) -> list[OrderEvent]:
-        """根据信号和当前持仓生成订单"""
-        # TODO: 实现
-        raise NotImplementedError("Portfolio.generate_orders not implemented")
+        """根据信号和当前持仓生成订单.
+
+        LONG 信号：如果未持仓，则买入
+        SHORT 信号：如果已持仓，则卖出
+        EXIT 信号：如果已持仓，则清仓
+        """
+        orders: list[OrderEvent] = []
+        bar_data = market_event.bar_data or {}
+
+        for signal in signals:
+            current_pos = self.positions.get(signal.symbol)
+            current_qty = current_pos.quantity if current_pos else 0
+
+            if signal.direction == "LONG" and current_qty <= 0:
+                # 买入
+                symbol_data = bar_data.get(signal.symbol, {})
+                price = (
+                    symbol_data.get("close", signal.price) if isinstance(symbol_data, dict) else signal.price
+                )
+                # 按信号强度决定仓位比例
+                strength = max(0.0, min(1.0, signal.strength))
+                cash_per_symbol = self.cash * 0.95  # 留5%现金
+                quantity = int(cash_per_symbol * strength / price) if price > 0 else 0
+
+                if quantity > 0:
+                    orders.append(
+                        OrderEvent(
+                            timestamp=signal.timestamp,
+                            symbol=signal.symbol,
+                            direction="BUY",
+                            quantity=quantity,
+                            price=price,
+                            order_type="MARKET",
+                        )
+                    )
+
+            elif signal.direction == "SHORT" and current_qty > 0:
+                # 卖出
+                orders.append(
+                    OrderEvent(
+                        timestamp=signal.timestamp,
+                        symbol=signal.symbol,
+                        direction="SELL",
+                        quantity=current_qty,
+                        price=0.0,
+                        order_type="MARKET",
+                    )
+                )
+
+            elif signal.direction == "EXIT" and current_qty > 0:
+                orders.append(
+                    OrderEvent(
+                        timestamp=signal.timestamp,
+                        symbol=signal.symbol,
+                        direction="SELL",
+                        quantity=current_qty,
+                        price=0.0,
+                        order_type="MARKET",
+                    )
+                )
+
+        return orders
 
     def update_from_fills(self, fills: list[FillEvent], timestamp: datetime) -> None:
         """根据成交结果更新持仓"""
-        # TODO: 实现
-        raise NotImplementedError("Portfolio.update_from_fills not implemented")
+        for fill in fills:
+            if fill.direction == "BUY":
+                # 买入
+                if fill.symbol in self.positions:
+                    pos = self.positions[fill.symbol]
+                    total_cost = pos.avg_price * pos.quantity + fill.fill_price * fill.quantity
+                    pos.quantity += fill.quantity
+                    pos.avg_price = total_cost / pos.quantity if pos.quantity > 0 else 0.0
+                else:
+                    self.positions[fill.symbol] = Position(
+                        symbol=fill.symbol,
+                        quantity=fill.quantity,
+                        avg_price=fill.fill_price,
+                        market_value=fill.fill_price * fill.quantity,
+                    )
+
+                self.cash -= fill.fill_price * fill.quantity + fill.commission
+
+            elif fill.direction == "SELL":
+                # 卖出
+                pos = self.positions.get(fill.symbol)
+                if pos:
+                    pos.quantity -= fill.quantity
+                    if pos.quantity <= 0:
+                        del self.positions[fill.symbol]
+                    else:
+                        pos.market_value = pos.avg_price * pos.quantity
+
+                self.cash += fill.fill_price * fill.quantity - fill.commission
+
+            # 更新持仓市值
+            for pos in self.positions.values():
+                # 使用成交价近似市值
+                pos.market_value = pos.avg_price * pos.quantity
+                pos.unrealized_pnl = 0.0  # 重新计算需参考市价
 
     def record_snapshot(self, timestamp: datetime) -> None:
-        """记录当前组合快照"""
-        # TODO: 实现
-        raise NotImplementedError("Portfolio.record_snapshot not implemented")
+        """记录当前组合快照（用于后续绩效分析）"""
+        self._nav_history.append(
+            {
+                "timestamp": timestamp,
+                "total_value": self.total_value,
+                "cash": self.cash,
+                "positions_value": sum(p.market_value for p in self.positions.values()),
+                "positions_count": len(self.positions),
+            }
+        )
 
     def get_nav_dataframe(self) -> pd.DataFrame:
         """获取净值曲线DataFrame"""
-        # TODO: 实现
-        raise NotImplementedError("Portfolio.get_nav_dataframe not implemented")
+        if not self._nav_history:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(self._nav_history)
+        df = df.set_index("timestamp")
+        df.index.name = "date"
+        return df

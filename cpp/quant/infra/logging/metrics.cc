@@ -30,7 +30,10 @@ Histogram::~Histogram() = default;
 
 void Histogram::observe(double value) noexcept {
     count_.fetch_add(1, std::memory_order_relaxed);
-    sum_.store(sum_.load(std::memory_order_relaxed) + value, std::memory_order_relaxed);
+    // CAS loop for atomic sum update
+    double expected = sum_.load(std::memory_order_relaxed);
+    while (!sum_.compare_exchange_weak(expected, expected + value,
+                                        std::memory_order_acq_rel)) {}
 
     // Track min/max
     double prev_min = min_.load(std::memory_order_relaxed);

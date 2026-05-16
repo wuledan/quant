@@ -1,6 +1,7 @@
-// BUILD — C++ event library
+# BUILD - C++ event library
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "event",

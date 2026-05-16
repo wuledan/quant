@@ -1,10 +1,10 @@
-// event_bus.cc — EventBus implementation
+// event_bus.cc — EventBus implementation with lock-free MPSC async queue
 #include "cpp/quant/event/event_bus.h"
+#include "cpp/quant/event/queue/mpsc_queue.h"
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
-#include <queue>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -24,7 +24,7 @@ struct SubscriptionEntry {
 struct StatsData {
     std::atomic<uint64_t> total_published{0};
     std::atomic<uint64_t> total_delivered{0};
-    std::atomic<uint64_t> queue_depth{0};
+    std::atomic<int64_t> queue_depth{0};
 };
 
 // ── EventBus::Impl ──
@@ -93,17 +93,16 @@ public:
     }
 
     void publish_async(std::unique_ptr<Event> event) {
-        {
-            std::lock_guard<std::mutex> lock(async_mutex_);
-            async_queue_.push(std::move(event));
-        }
+        ensure_async_worker();
+        async_queue_.enqueue(std::move(event));
         async_cv_.notify_one();
         stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
     }
 
     void replay_history(SubscriptionId id, size_t count) {
-        // Replay is a no-op in this implementation; it would require
-        // storing event history. Can be added later.
+        // Replay requires clone() on Event; to be implemented when needed.
+        (void)id;
+        (void)count;
     }
 
     Stats stats() const {
@@ -111,7 +110,7 @@ public:
             .total_published = stats_.total_published.load(std::memory_order_relaxed),
             .total_delivered = stats_.total_delivered.load(std::memory_order_relaxed),
             .avg_publish_latency_ns = 0,
-            .queue_depth = stats_.queue_depth.load(std::memory_order_relaxed),
+            .queue_depth = static_cast<uint64_t>(stats_.queue_depth.load(std::memory_order_relaxed)),
         };
     }
 
@@ -124,7 +123,7 @@ private:
 
     void stop_async_worker() {
         {
-            std::lock_guard<std::mutex> lock(async_mutex_);
+            std::lock_guard<std::mutex> lock(cv_mutex_);
             stop_requested_ = true;
         }
         async_cv_.notify_one();
@@ -138,16 +137,13 @@ private:
         while (true) {
             std::unique_ptr<Event> event;
             {
-                std::unique_lock<std::mutex> lock(async_mutex_);
+                std::unique_lock<std::mutex> lock(cv_mutex_);
                 async_cv_.wait(lock, [this] {
                     return stop_requested_ || !async_queue_.empty();
                 });
                 if (stop_requested_ && async_queue_.empty()) break;
 
-                if (!async_queue_.empty()) {
-                    event = std::move(async_queue_.front());
-                    async_queue_.pop();
-                }
+                (void)async_queue_.dequeue(event);  // SC consumer
             }
 
             if (event) {
@@ -157,7 +153,7 @@ private:
         }
     }
 
-    Options opts_;
+    EventBus::Options opts_;
     std::atomic<SubscriptionId> next_id_;
 
     // Sharded subscription lists
@@ -167,9 +163,9 @@ private:
     };
     std::vector<std::unique_ptr<Shard>> subscriptions_;
 
-    // Async delivery
-    std::queue<std::unique_ptr<Event>> async_queue_;
-    std::mutex async_mutex_;
+    // Lock-free MPSC async delivery queue
+    MPSCQueue<std::unique_ptr<Event>> async_queue_;
+    std::mutex cv_mutex_;              // only used with cv_, not queue
     std::condition_variable async_cv_;
     std::atomic<bool> stop_requested_{false};
 
@@ -178,12 +174,13 @@ private:
 
     // Stats
     StatsData stats_;
+
 };
 
 // ── EventBus public API ──
 
 EventBus::EventBus(const Options& opts)
-    : impl_(std::make_unique<Impl>(std::move(opts))) {}
+    : impl_(std::make_unique<Impl>(opts)) {}
 
 EventBus::~EventBus() = default;
 

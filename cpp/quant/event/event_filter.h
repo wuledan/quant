@@ -11,6 +11,9 @@
 #include <span>
 
 #include "cpp/quant/event/event.h"
+#include "cpp/quant/event/events/market_data_event.h"
+#include "cpp/quant/event/events/kline_event.h"
+#include "cpp/quant/event/events/trade_signal_event.h"
 
 namespace quant::event {
 
@@ -31,8 +34,18 @@ public:
     }
 
     bool accept(const Event& event) const override {
-        // Try to find the symbol in the event; events without a symbol pass through
-        return true;  // Base implementation: no symbol extraction from generic Event
+        // Extract symbol via dynamic_cast for known event types
+        if (const auto* mde = dynamic_cast<const MarketDataEvent*>(&event)) {
+            return symbols_.count(mde->symbol) > 0;
+        }
+        if (const auto* ke = dynamic_cast<const KlineEvent*>(&event)) {
+            return symbols_.count(ke->symbol) > 0;
+        }
+        if (const auto* tse = dynamic_cast<const TradeSignalEvent*>(&event)) {
+            return symbols_.count(tse->symbol) > 0;
+        }
+        // Events without a symbol pass through
+        return true;
     }
 
 private:

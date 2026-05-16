@@ -57,15 +57,16 @@ public:
     std::optional<T> get(std::string_view key) const {
         std::shared_lock lock(mutex_);
         // Strategy > Module > Global
-        auto it = strategy_config_.find(key);
+        std::string key_str(key);
+        auto it = strategy_config_.find(key_str);
         if (it != strategy_config_.end()) {
             return extract_value<T>(it->second);
         }
-        it = module_config_.find(key);
+        it = module_config_.find(key_str);
         if (it != module_config_.end()) {
             return extract_value<T>(it->second);
         }
-        it = global_config_.find(key);
+        it = global_config_.find(key_str);
         if (it != global_config_.end()) {
             return extract_value<T>(it->second);
         }
@@ -104,10 +105,24 @@ private:
     void notify_change(const ConfigChangeEvent& event);
     void hot_reload_loop();
 
+    // ── Hot reload helpers ──
+    void reload_sources(
+        std::vector<std::unique_ptr<ConfigSource>>& sources,
+        std::map<std::string, ConfigValue>& config,
+        ConfigLevel level,
+        std::unique_lock<std::shared_mutex>& lock);
+
+    void reload_sources(
+        std::unordered_map<std::string,
+            std::vector<std::unique_ptr<ConfigSource>>>& sources_map,
+        std::map<std::string, ConfigValue>& config,
+        ConfigLevel level,
+        std::unique_lock<std::shared_mutex>& lock);
+
     mutable std::shared_mutex mutex_;
-    std::map<std::string, ConfigValue, std::less<>> global_config_;
-    std::map<std::string, ConfigValue, std::less<>> module_config_;
-    std::map<std::string, ConfigValue, std::less<>> strategy_config_;
+    std::map<std::string, ConfigValue> global_config_;
+    std::map<std::string, ConfigValue> module_config_;
+    std::map<std::string, ConfigValue> strategy_config_;
 
     std::vector<std::unique_ptr<ConfigSource>> global_sources_;
     std::unordered_map<std::string, std::vector<std::unique_ptr<ConfigSource>>> module_sources_;

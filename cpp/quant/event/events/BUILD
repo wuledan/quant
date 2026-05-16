@@ -1,6 +1,7 @@
-// BUILD — C++ event type definitions
+# BUILD - C++ event type definitions
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "event_types",

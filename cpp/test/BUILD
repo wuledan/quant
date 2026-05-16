@@ -1,8 +1,7 @@
-// BUILD — C++ test targets
+# BUILD - C++ test targets
 
 package(default_visibility = ["//visibility:public"])
 
-load("@com_google_googletest//:gtest.bzl", "gtest")
 
 cc_test(
     name = "error_codes_test",

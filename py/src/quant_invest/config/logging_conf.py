@@ -5,7 +5,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from quant_invest.config.settings import settings
+from quant_invest.core.settings import get_settings
 
 
 def setup_logging(level: str | None = None, log_path: str | None = None) -> None:
@@ -15,8 +15,9 @@ def setup_logging(level: str | None = None, log_path: str | None = None) -> None
         level: 日志级别，默认使用 settings.LOG_LEVEL
         log_path: 日志路径，默认使用 settings.LOG_PATH
     """
-    level = level or settings.LOG_LEVEL
-    log_path = log_path or settings.LOG_PATH
+    settings = get_settings()
+    level = level or settings.LOGGING.LEVEL
+    log_path = log_path or settings.DATA_STORAGE_PATH
 
     # 移除默认handler
     logger.remove()

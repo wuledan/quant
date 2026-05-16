@@ -5,6 +5,8 @@
 #include <ctime>
 #include <string>
 
+#include "cpp/quant/infra/logging/logger.h"
+
 namespace quant::infra {
 
 // ANSI color codes

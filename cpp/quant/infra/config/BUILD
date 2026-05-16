@@ -1,6 +1,7 @@
-// BUILD — C++ configuration management library
+# BUILD - C++ configuration management library
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "config",

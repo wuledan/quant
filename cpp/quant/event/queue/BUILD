@@ -1,6 +1,7 @@
-// BUILD — C++ event queue utilities
+# BUILD - C++ event queue utilities
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "event_queue",

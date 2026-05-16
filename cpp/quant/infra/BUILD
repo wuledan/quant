@@ -1,6 +1,7 @@
-// BUILD — C++ infrastructure library
+# BUILD - C++ infrastructure library
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "infra",

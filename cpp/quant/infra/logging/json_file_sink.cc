@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <cstring>
+
+#include "cpp/quant/infra/logging/logger.h"
 
 namespace quant::infra {
 
@@ -85,15 +88,42 @@ JsonFileSink::JsonFileSink(std::string_view file_path, size_t rotate_size_mb)
 JsonFileSink::~JsonFileSink() = default;
 
 std::string JsonFileSink::format_json(const LogRecord& record) const {
-    // Format as: {"ts":"...","level":"INFO","msg":"...","file":"...","line":123,"thread":"..."}
+    // Format as: {"ts":...,"level":"INFO","msg":"...",...}
+    auto escape = [](std::string_view s) -> std::string {
+        std::string out;
+        out.reserve(s.size() + 8);
+        for (char c : s) {
+            switch (c) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n"; break;
+                case '\r': out += "\\r"; break;
+                case '\t': out += "\\t"; break;
+                case '\b': out += "\\b"; break;
+                case '\f': out += "\\f"; break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20) {
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x",
+                                      static_cast<unsigned char>(c));
+                        out += buf;
+                    } else {
+                        out += c;
+                    }
+                    break;
+            }
+        }
+        return out;
+    };
+
     std::string json = "{";
     json += "\"ts\":" + std::to_string(record.timestamp_us) + ",";
-    json += "\"level\":\"" + level_name(static_cast<LogLevel>(record.level)) + "\",";
-    json += "\"msg\":\"" + record.message + "\",";
-    json += "\"file\":\"" + record.file + "\",";
+    json += "\"level\":\"" + std::string(level_name(static_cast<LogLevel>(record.level))) + "\",";
+    json += "\"msg\":\"" + escape(record.message) + "\",";
+    json += "\"file\":\"" + escape(record.file) + "\",";
     json += "\"line\":" + std::to_string(record.line) + ",";
-    json += "\"func\":\"" + record.function + "\",";
-    json += "\"thread\":\"" + record.thread_id + "\"";
+    json += "\"func\":\"" + escape(record.function) + "\",";
+    json += "\"thread\":\"" + escape(record.thread_id) + "\"";
     if (!record.extra_json.empty()) {
         json += "," + record.extra_json;
     }

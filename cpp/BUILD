@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 # C++20 compilation flags shared across all targets
 COPTS = [
     "-std=c++20",

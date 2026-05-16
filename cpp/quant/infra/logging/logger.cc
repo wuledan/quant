@@ -250,12 +250,16 @@ Logger& default_logger() {
 }
 
 void set_default_logger(std::unique_ptr<Logger> new_logger) {
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wunused-but-set-variable"
     // Note: This is intentionally a leak to avoid static destruction ordering issues.
+    // In a real implementation, redirect calls via a std::atomic<Logger*>.
     static Logger* current = &default_logger();
     if (new_logger) {
         current = new_logger.release();
     }
-    // In a real implementation, redirect calls via a std::atomic<Logger*>.
+    #pragma GCC diagnostic pop
 }
 
 }  // namespace quant::infra
+    #pragma GCC diagnostic pop

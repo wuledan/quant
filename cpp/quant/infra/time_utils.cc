@@ -143,7 +143,7 @@ std::string Timestamp::to_time_str() const {
     char time_part[64];
     strftime(time_part, sizeof(time_part), "%H:%M:%S", &tm_buf);
 
-    char result[80];
+    char result[96];
     snprintf(result, sizeof(result), "%s.%09ld", time_part,
              static_cast<long>(nsec));
     return std::string(result);

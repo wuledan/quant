@@ -1,6 +1,7 @@
-// BUILD — C++ logging and metrics library
+# BUILD - C++ logging and metrics library
 
 package(default_visibility = ["//visibility:public"])
+
 
 cc_library(
     name = "logging",

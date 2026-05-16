@@ -1,7 +1,9 @@
 # Bazel build options for quant_invest
 
 # C++20 standard
-build --cxxopt=-std=c++20
+common --noenable_bzlmod
+
+common --cxxopt=-std=c++20
 build --conlyopt=-std=c2x
 
 # Compiler warnings (Google C++ Style)
