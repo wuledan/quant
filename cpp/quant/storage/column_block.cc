@@ -36,8 +36,8 @@ std::vector<uint8_t> ColumnBlock::delta_encode(std::span<const int64_t> src) {
         int64_t delta_of_delta = delta - prev_delta;
 
         uint8_t buf[10];
-        uint64_t val = (static_cast<uint64_t>(delta_of_delta) << 1) ^
-                       (static_cast<uint64_t>(delta_of_delta) >> 63);
+        uint64_t val = (static_cast<uint64_t>(delta_of_delta << 1)) ^
+                       static_cast<uint64_t>(delta_of_delta >> 63);
 
         size_t n = 0;
         do {
@@ -80,7 +80,8 @@ std::vector<int64_t> ColumnBlock::delta_decode(std::span<const uint8_t> src, siz
             shift += 7;
         } while (byte & 0x80);
 
-        int64_t delta_of_delta = (val >> 1) ^ -(static_cast<int64_t>(val & 1));
+        int64_t delta_of_delta = static_cast<int64_t>(val >> 1) ^
+                                 -static_cast<int64_t>(val & 1);
         int64_t delta = prev_delta + delta_of_delta;
         int64_t value = prev + delta;
 
@@ -109,9 +110,10 @@ std::vector<uint8_t> ColumnBlock::delta_encode_i32(std::span<const int32_t> src)
         int32_t delta = src[i] - prev;
         int32_t delta_of_delta = delta - prev_delta;
 
+        // Zigzag encode: maps signed to unsigned for varint
+        uint32_t val = (static_cast<uint32_t>(delta_of_delta << 1)) ^
+                       static_cast<uint32_t>(delta_of_delta >> 31);
         uint8_t buf[5];
-        uint32_t val = (static_cast<uint32_t>(delta_of_delta) << 1) ^
-                       (static_cast<uint32_t>(delta_of_delta) >> 31);
         size_t n = 0;
         do {
             buf[n] = val & 0x7F;
@@ -152,7 +154,8 @@ std::vector<int32_t> ColumnBlock::delta_decode_i32(std::span<const uint8_t> src,
             shift += 7;
         } while (byte & 0x80);
 
-        int32_t delta_of_delta = (val >> 1) ^ -(static_cast<int32_t>(val & 1));
+        int32_t delta_of_delta = static_cast<int32_t>(val >> 1) ^
+                                 -static_cast<int32_t>(val & 1);
         int32_t delta = prev_delta + delta_of_delta;
         int32_t value = prev + delta;
 
@@ -200,13 +203,13 @@ std::vector<uint8_t> ColumnBlock::gorilla_encode(std::span<const double> src) {
             // Control bit '0' = same as previous
             out.push_back(0x00);
         } else {
-            // Control byte 0xFF = different
-            out.push_back(0xFF);
+            // Control byte 0x01 = different value follows
+            out.push_back(0x01);
+            // Store: leading_zeros (1 byte) + xor_value shifted
             int leading = __builtin_clzll(xor_result);
             int trailing = __builtin_ctzll(xor_result);
-            int meaningful = 64 - leading - trailing;
 
-            write_varint(static_cast<uint64_t>(meaningful));
+            out.push_back(static_cast<uint8_t>(leading));
             write_varint(xor_result >> trailing);
             prev_bits = cur_bits;
         }
@@ -249,15 +252,41 @@ std::vector<double> ColumnBlock::gorilla_decode(std::span<const uint8_t> src, si
             double val;
             std::memcpy(&val, &prev_bits, 8);
             out.push_back(val);
-        } else {
-            // Different value
-            int meaningful = static_cast<int>(read_varint(pos));
+        } else if (control == 0x01) {
+            // Different value: leading_zeros byte + shifted xor_value varint
+            if (pos >= src.size()) break;
+            int leading = static_cast<int>(src[pos++]);
             uint64_t xor_val = read_varint(pos);
-            uint64_t cur_bits = prev_bits ^ xor_val;
+            // Reconstruct: shift xor_val left by leading zeros count
+            // (trailing zeros were removed during encoding, we need to determine
+            // meaningful bits and shift accordingly)
+            int meaningful = 64 - leading - __builtin_ctzll(xor_val | (1ULL << 63));
+            // Actually, we need trailing zeros count. Since encoding stored
+            // xor_result >> trailing, we need to figure out trailing from the
+            // meaningful bit count. But we only stored leading.
+            // Easier approach: store the shifted value and leading zeros,
+            // then reconstruct by shifting back.
+            // The original xor_result = (xor_val << trailing) where trailing = 64 - leading - meaningful
+            // But we need meaningful bits count. Let's compute it from xor_val.
+            int trailing = 64 - leading - (64 - __builtin_clzll(xor_val) - __builtin_ctzll(xor_val | (xor_val == 0 ? 1ULL : 0ULL)));
+            // Actually simpler: xor_val was xor_result >> trailing.
+            // We stored leading as a byte. We can reconstruct:
+            uint64_t reconstructed_xor = xor_val << (64 - leading - (64 - __builtin_clzll(xor_val) - __builtin_ctzll(xor_val)));
+            // Hmm, this is getting complicated. Let's use a simpler approach.
+            // Since we shifted out trailing zeros, xor_val has no trailing zeros
+            // (unless the original had no trailing zeros).
+            // trailing_original = 64 - leading - (64 - __builtin_clzll(xor_val))
+            int meaningful_bits = 64 - __builtin_clzll(xor_val);
+            int trailing_original = 64 - leading - meaningful_bits;
+            uint64_t full_xor = xor_val << trailing_original;
+            uint64_t cur_bits = prev_bits ^ full_xor;
             double val;
             std::memcpy(&val, &cur_bits, 8);
             out.push_back(val);
             prev_bits = cur_bits;
+        } else {
+            // Unknown control byte, skip
+            break;
         }
     }
 

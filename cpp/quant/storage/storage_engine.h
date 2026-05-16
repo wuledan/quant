@@ -20,6 +20,7 @@ public:
         std::string data_dir;
 
         Options() : cache_budget_mb(256), data_dir("./data") {}
+        Options(size_t mb, std::string dir) : cache_budget_mb(mb), data_dir(std::move(dir)) {}
     };
 
     explicit StorageEngine(Options opts = {});

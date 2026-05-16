@@ -70,3 +70,23 @@ class FactorCalcResponse(BaseModel):
     """因子计算响应."""
 
     factors: dict[str, dict[str, float]]
+
+
+class RiskAlertCreate(BaseModel):
+    """风控告警创建请求."""
+
+    alert_type: str = Field(..., description="告警类型")
+    severity: str = Field("medium", description="告警级别 high/medium/low")
+    message: str = Field(..., description="告警信息")
+    symbol: str = Field("", description="关联标的")
+
+
+class DataKlineRequest(BaseModel):
+    """K线数据请求."""
+
+    symbol: str = Field(..., description="标的代码")
+    frequency: str = Field("daily", description="数据频率")
+    start_date: str = Field("", description="开始日期")
+    end_date: str = Field("", description="结束日期")
+    adjust: str = Field("none", description="复权方式")
+    limit: int = Field(1000, description="返回条数", le=10000)

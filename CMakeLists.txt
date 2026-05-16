@@ -55,6 +55,7 @@ add_library(quant_storage
     cpp/quant/storage/time_series_cache.cc
     cpp/quant/storage/time_series_store.cc
     cpp/quant/storage/disk_persistence.cc
+    cpp/quant/storage/storage_engine.cc
 )
 target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_storage PUBLIC quant_event)
@@ -63,9 +64,17 @@ target_link_libraries(quant_storage PUBLIC quant_event)
 add_library(quant_execution
     cpp/quant/execution/order_state_machine.cc
     cpp/quant/execution/order_manager.cc
+    cpp/quant/execution/algorithmic_trader.cc
 )
 target_include_directories(quant_execution PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_execution PUBLIC quant_infra)
+
+# ── risk library ──
+add_library(quant_risk
+    cpp/quant/risk/risk_engine.cc
+)
+target_include_directories(quant_risk PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_risk PUBLIC quant_event)
 
 # ── Tests ──
 include(FetchContent)
@@ -120,3 +129,11 @@ add_test(NAME metrics_test COMMAND metrics_test)
 add_executable(config_test cpp/test/config_test.cc)
 target_link_libraries(config_test PRIVATE quant_config GTest::gtest_main)
 add_test(NAME config_test COMMAND config_test)
+
+add_executable(storage_test cpp/test/storage_test.cc)
+target_link_libraries(storage_test PRIVATE quant_storage GTest::gtest_main)
+add_test(NAME storage_test COMMAND storage_test)
+
+add_executable(execution_test cpp/test/execution_test.cc)
+target_link_libraries(execution_test PRIVATE quant_execution GTest::gtest_main)
+add_test(NAME execution_test COMMAND execution_test)

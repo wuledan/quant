@@ -69,4 +69,3 @@ async def get_index_constituents(
 ):
     """获取指数成分股."""
     return {"index_code": index_code, "constituents": []}
-</｜DSML｜parameter>
