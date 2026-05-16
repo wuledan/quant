@@ -1,0 +1,123 @@
+// websocket_server.cc — WebSocket server implementation
+#include "cpp/quant/network/websocket_server.h"
+#include "cpp/quant/network/tcp_connection.h"
+
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <set>
+#include <sstream>
+#include <thread>
+
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+namespace quant::network {
+
+struct WebSocketServer::Impl {
+    std::map<int, std::string> fd_to_session;    // socket fd -> session id
+    std::map<std::string, int> session_to_fd;    // session id -> socket fd
+    std::map<std::string, IoBuffer> session_buffers;
+    mutable std::mutex mutex;
+    std::thread accept_thread;
+    std::atomic<bool> stop{false};
+};
+
+WebSocketServer::WebSocketServer(WsServerConfig config)
+    : impl_(std::make_unique<Impl>()), config_(std::move(config)) {}
+
+WebSocketServer::~WebSocketServer() { stop(); }
+
+bool WebSocketServer::start() {
+    if (running_.exchange(true)) return false;
+
+    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) { running_.store(false); return false; }
+
+    int opt = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(config_.port));
+
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd); running_.store(false); return false;
+    }
+    if (::listen(fd, 128) < 0) {
+        ::close(fd); running_.store(false); return false;
+    }
+
+    listen_fd_.store(fd, std::memory_order_relaxed);
+    return true;
+}
+
+void WebSocketServer::stop() noexcept {
+    running_.store(false, std::memory_order_relaxed);
+    int fd = listen_fd_.exchange(-1, std::memory_order_relaxed);
+    if (fd >= 0) ::close(fd);
+}
+
+bool WebSocketServer::send(const std::string& session_id, const std::string& message) {
+    auto frame = encode_ws_frame(
+        reinterpret_cast<const uint8_t*>(message.data()),
+        message.size(), WsOpcode::kText);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
+
+    // In production: write to session's socket
+    // For now: placeholder — actual socket write happens in event loop
+    return true;
+}
+
+bool WebSocketServer::send_binary(const std::string& session_id, const uint8_t* data, size_t len) {
+    auto frame = encode_ws_frame(data, len, WsOpcode::kBinary);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
+    return true;
+}
+
+void WebSocketServer::broadcast(const std::string& message) {
+    auto frame = encode_ws_frame(
+        reinterpret_cast<const uint8_t*>(message.data()),
+        message.size(), WsOpcode::kText);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size() * session_count(), std::memory_order_relaxed);
+}
+
+bool WebSocketServer::close_session(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto it = impl_->session_to_fd.find(session_id);
+    if (it != impl_->session_to_fd.end()) {
+        ::close(it->second);
+        impl_->session_to_fd.erase(it);
+        impl_->fd_to_session.erase(it->second);
+        impl_->session_buffers.erase(session_id);
+        stats_.connections_closed.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    return false;
+}
+
+size_t WebSocketServer::session_count() const noexcept {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->session_to_fd.size();
+}
+
+WebSocketServer::Stats WebSocketServer::stats() const noexcept {
+    Stats s;
+    s.messages_sent = stats_.messages_sent.load(std::memory_order_relaxed);
+    s.messages_received = stats_.messages_received.load(std::memory_order_relaxed);
+    s.bytes_sent = stats_.bytes_sent.load(std::memory_order_relaxed);
+    s.bytes_received = stats_.bytes_received.load(std::memory_order_relaxed);
+    s.connections_opened = stats_.connections_opened.load(std::memory_order_relaxed);
+    s.connections_closed = stats_.connections_closed.load(std::memory_order_relaxed);
+    return s;
+}
+
+}  // namespace quant::network

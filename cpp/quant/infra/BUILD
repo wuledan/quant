@@ -22,3 +22,17 @@ cc_library(
     include_prefix = "quant/infra",
     strip_include_prefix = ".",
 )
+
+cc_library(
+    name = "infra_headers",
+    hdrs = [
+        "error_codes.h",
+        "memory_pool.h",
+        "object_pool.h",
+        "thread_pool.h",
+        "time_utils.h",
+    ],
+    copts = ["-std=c++20"],
+    include_prefix = "quant/infra",
+    strip_include_prefix = ".",
+)

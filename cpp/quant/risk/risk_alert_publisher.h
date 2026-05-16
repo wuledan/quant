@@ -1,12 +1,14 @@
 // risk_alert_publisher.h — Publishes risk alerts via EventBus
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
 
 #include "cpp/quant/event/event_bus.h"
 #include "cpp/quant/event/events/risk_alert_event.h"
+#include "cpp/quant/risk/risk_rule.h"
 
 namespace quant::risk {
 

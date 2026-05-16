@@ -104,3 +104,33 @@ cc_test(
     ],
     copts = ["-std=c++20"],
 )
+
+cc_test(
+    name = "execution_test",
+    srcs = ["execution_test.cc"],
+    deps = [
+        "//cpp/quant/execution:execution",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "risk_test",
+    srcs = ["risk_test.cc"],
+    deps = [
+        "//cpp/quant/risk:risk",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)
+
+cc_test(
+    name = "network_test",
+    srcs = ["network_test.cc"],
+    deps = [
+        "//cpp/quant/network:network",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = ["-std=c++20"],
+)

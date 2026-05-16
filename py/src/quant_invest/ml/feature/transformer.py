@@ -29,4 +29,9 @@ class FeatureTransformer:
     @staticmethod
     def fillna(df: pd.DataFrame, method: str = "ffill") -> pd.DataFrame:
         """缺失值填充."""
-        return df.fillna(method=method) if method in ("ffill", "bfill") else df.fillna(df.mean())
+        if method == "ffill":
+            return df.ffill()
+        elif method == "bfill":
+            return df.bfill()
+        else:
+            return df.fillna(df.mean())

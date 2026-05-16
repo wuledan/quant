@@ -69,6 +69,25 @@ add_library(quant_execution
 target_include_directories(quant_execution PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_execution PUBLIC quant_infra)
 
+# ── factor library ──
+add_library(quant_factor
+    cpp/quant/factor/factor_registry.cc
+    cpp/quant/factor/factor_dag.cc
+    cpp/quant/factor/factor_computer.cc
+    cpp/quant/factor/built_in_factors.cc
+)
+target_include_directories(quant_factor PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_factor PUBLIC quant_infra)
+
+# ── network library ──
+add_library(quant_network
+    cpp/quant/network/tcp_connection.cc
+    cpp/quant/network/websocket_server.cc
+    cpp/quant/network/ws_session.cc
+)
+target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_network PUBLIC quant_infra)
+
 # ── risk library ──
 add_library(quant_risk
     cpp/quant/risk/risk_engine.cc
@@ -134,6 +153,18 @@ add_executable(storage_test cpp/test/storage_test.cc)
 target_link_libraries(storage_test PRIVATE quant_storage GTest::gtest_main)
 add_test(NAME storage_test COMMAND storage_test)
 
+add_executable(factor_test cpp/test/factor_test.cc)
+target_link_libraries(factor_test PRIVATE quant_factor GTest::gtest_main)
+add_test(NAME factor_test COMMAND factor_test)
+
 add_executable(execution_test cpp/test/execution_test.cc)
 target_link_libraries(execution_test PRIVATE quant_execution GTest::gtest_main)
 add_test(NAME execution_test COMMAND execution_test)
+
+add_executable(risk_test cpp/test/risk_test.cc)
+target_link_libraries(risk_test PRIVATE quant_risk GTest::gtest_main)
+add_test(NAME risk_test COMMAND risk_test)
+
+add_executable(network_test cpp/test/network_test.cc)
+target_link_libraries(network_test PRIVATE quant_network GTest::gtest_main)
+add_test(NAME network_test COMMAND network_test)

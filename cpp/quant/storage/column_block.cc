@@ -170,6 +170,14 @@ std::vector<int32_t> ColumnBlock::delta_decode_i32(std::span<const uint8_t> src,
 // Gorilla XOR encoding (for double values)
 // ========================================================================
 
+// Format: first value stored as raw 8 bytes, then for each subsequent value:
+//   0x00        → XOR with previous is 0 (value unchanged)
+//   0x01 L [V]  → XOR with previous is non-zero
+//       L       = leading zero count (1 byte)
+//       V       = (xor_result >> trailing_zeros) encoded as varint
+//
+// At decode time: trailing = clz(shifted_val) - L, then full_xor = shifted_val << trailing
+
 std::vector<uint8_t> ColumnBlock::gorilla_encode(std::span<const double> src) {
     if (src.empty()) return {};
 
@@ -181,7 +189,6 @@ std::vector<uint8_t> ColumnBlock::gorilla_encode(std::span<const double> src) {
     out.resize(8);
     std::memcpy(out.data(), &prev_bits, 8);
 
-    // Simplified Gorilla: store XOR result with leading zeros count
     auto write_varint = [&](uint64_t val) {
         uint8_t buf[10];
         size_t n = 0;
@@ -200,15 +207,11 @@ std::vector<uint8_t> ColumnBlock::gorilla_encode(std::span<const double> src) {
         uint64_t xor_result = prev_bits ^ cur_bits;
 
         if (xor_result == 0) {
-            // Control bit '0' = same as previous
             out.push_back(0x00);
         } else {
-            // Control byte 0x01 = different value follows
             out.push_back(0x01);
-            // Store: leading_zeros (1 byte) + xor_value shifted
             int leading = __builtin_clzll(xor_result);
             int trailing = __builtin_ctzll(xor_result);
-
             out.push_back(static_cast<uint8_t>(leading));
             write_varint(xor_result >> trailing);
             prev_bits = cur_bits;
@@ -248,44 +251,19 @@ std::vector<double> ColumnBlock::gorilla_decode(std::span<const uint8_t> src, si
     while (out.size() < count && pos < src.size()) {
         uint8_t control = src[pos++];
         if (control == 0x00) {
-            // Same as previous
-            double val;
-            std::memcpy(&val, &prev_bits, 8);
-            out.push_back(val);
-        } else if (control == 0x01) {
-            // Different value: leading_zeros byte + shifted xor_value varint
-            if (pos >= src.size()) break;
+            out.push_back(*reinterpret_cast<const double*>(&prev_bits));
+        } else if (control == 0x01 && pos < src.size()) {
             int leading = static_cast<int>(src[pos++]);
-            uint64_t xor_val = read_varint(pos);
-            // Reconstruct: shift xor_val left by leading zeros count
-            // (trailing zeros were removed during encoding, we need to determine
-            // meaningful bits and shift accordingly)
-            int meaningful = 64 - leading - __builtin_ctzll(xor_val | (1ULL << 63));
-            // Actually, we need trailing zeros count. Since encoding stored
-            // xor_result >> trailing, we need to figure out trailing from the
-            // meaningful bit count. But we only stored leading.
-            // Easier approach: store the shifted value and leading zeros,
-            // then reconstruct by shifting back.
-            // The original xor_result = (xor_val << trailing) where trailing = 64 - leading - meaningful
-            // But we need meaningful bits count. Let's compute it from xor_val.
-            int trailing = 64 - leading - (64 - __builtin_clzll(xor_val) - __builtin_ctzll(xor_val | (xor_val == 0 ? 1ULL : 0ULL)));
-            // Actually simpler: xor_val was xor_result >> trailing.
-            // We stored leading as a byte. We can reconstruct:
-            uint64_t reconstructed_xor = xor_val << (64 - leading - (64 - __builtin_clzll(xor_val) - __builtin_ctzll(xor_val)));
-            // Hmm, this is getting complicated. Let's use a simpler approach.
-            // Since we shifted out trailing zeros, xor_val has no trailing zeros
-            // (unless the original had no trailing zeros).
-            // trailing_original = 64 - leading - (64 - __builtin_clzll(xor_val))
-            int meaningful_bits = 64 - __builtin_clzll(xor_val);
-            int trailing_original = 64 - leading - meaningful_bits;
-            uint64_t full_xor = xor_val << trailing_original;
-            uint64_t cur_bits = prev_bits ^ full_xor;
-            double val;
-            std::memcpy(&val, &cur_bits, 8);
-            out.push_back(val);
-            prev_bits = cur_bits;
+            uint64_t shifted_val = read_varint(pos);
+            // shifted_val = xor_result >> trailing (no trailing zeros in shifted_val)
+            // meaningful_bits = 64 - clz(shifted_val)
+            // trailing = clz(shifted_val) - leading
+            int sh_clz = __builtin_clzll(shifted_val);
+            int trailing = sh_clz - leading;
+            uint64_t full_xor = shifted_val << trailing;
+            prev_bits ^= full_xor;
+            out.push_back(*reinterpret_cast<const double*>(&prev_bits));
         } else {
-            // Unknown control byte, skip
             break;
         }
     }
