@@ -44,8 +44,8 @@ TEST(ErrorNodeTest, ToString) {
                             "strategy failed",
                             std::move(cause));
     std::string str = root->to_string();
-    EXPECT_TRUE(str.find("StrategyRuntimeError") != std::string::npos);
-    EXPECT_TRUE(str.find("DataNotFound") != std::string::npos);
+    EXPECT_TRUE(str.find("Strategy runtime error") != std::string::npos);
+    EXPECT_TRUE(str.find("Data not found") != std::string::npos);
     EXPECT_TRUE(str.find("Caused by") != std::string::npos);
 }
 
@@ -100,7 +100,7 @@ TEST(QuantExceptionTest, ThrowAndCatch) {
         throw QuantException(ErrorCode::InvalidArgument, "bad input");
     } catch (const QuantException& e) {
         std::string msg = e.what();
-        EXPECT_TRUE(msg.find("InvalidArgument") != std::string::npos);
+        EXPECT_TRUE(msg.find("Invalid argument") != std::string::npos);
         EXPECT_TRUE(msg.find("bad input") != std::string::npos);
     }
 }

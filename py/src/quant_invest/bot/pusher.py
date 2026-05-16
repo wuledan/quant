@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
@@ -25,7 +25,7 @@ class PushMessage:
     type: PushType
     title: str
     content: dict
-    timestamp: datetime = None  # type: ignore[assignment]
+    timestamp: datetime | None = None
     priority: str = "normal"
 
 
@@ -59,5 +59,18 @@ class SignalPusher:
 
     async def _send(self, message: PushMessage) -> dict:
         """发送消息到飞书."""
-        # TODO: 实现飞书API调用
-        return {"success": True}
+        if not self.webhook_url:
+            return {"success": False, "error": "webhook_url not configured"}
+
+        from quant_invest.bot.templates import MessageTemplates
+
+        card = MessageTemplates.build_push_card(message)
+
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(self.webhook_url, json=card)
+                return {"success": resp.is_success, "status_code": resp.status_code}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

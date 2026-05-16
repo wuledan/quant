@@ -184,7 +184,7 @@ public:
     auto map(Func&& f) -> Result<std::invoke_result_t<Func, T>> {
         using ReturnType = std::invoke_result_t<Func, T>;
         if (!ok()) {
-            return ReturnType(ErrorCode::Unknown, error_ ? error_->message() : "unknown");
+            return Result<ReturnType>(ErrorCode::Unknown, error_ ? error_->message() : "unknown");
         }
         try {
             return Result<ReturnType>(std::forward<Func>(f)(value()));
@@ -195,7 +195,15 @@ public:
 
     template<typename Func>
     auto and_then(Func&& f) -> std::invoke_result_t<Func, T> {
-        return std::forward<Func>(f)(value());
+        using ReturnType = std::invoke_result_t<Func, T>;
+        if (!ok()) {
+            if (error_) {
+                return ReturnType(std::make_unique<ErrorNode>(
+                    error_->code(), error_->message()));
+            }
+            return ReturnType(ErrorCode::Unknown, "unknown error");
+        }
+        return std::forward<Func>(f)(*value_);
     }
 
 private:

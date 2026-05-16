@@ -121,7 +121,7 @@ void ConfigManager::reload_sources(
     std::vector<std::unique_ptr<ConfigSource>>& sources,
     std::map<std::string, ConfigValue>& config,
     ConfigLevel level,
-    std::unique_lock<std::shared_mutex>>& lock) {
+    std::unique_lock<std::shared_mutex>& lock) {
     if (sources.empty()) return;
 
     auto old_config = config;
@@ -154,7 +154,7 @@ void ConfigManager::reload_sources(
         std::vector<std::unique_ptr<ConfigSource>>>& sources_map,
     std::map<std::string, ConfigValue>& config,
     ConfigLevel level,
-    std::unique_lock<std::shared_mutex>>& lock) {
+    std::unique_lock<std::shared_mutex>& lock) {
     if (sources_map.empty()) return;
 
     auto old_config = config;

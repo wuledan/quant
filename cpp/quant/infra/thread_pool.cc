@@ -288,11 +288,8 @@ void ThreadPool::enqueue_task(Task task) {
 
 ThreadPool& default_thread_pool() {
     static ThreadPool pool(ThreadPoolConfig{});
-    static bool initialized = false;
-    if (!initialized) {
-        pool.start();
-        initialized = true;
-    }
+    static std::once_flag flag;
+    std::call_once(flag, []() { default_thread_pool().start(); });
     return pool;
 }
 

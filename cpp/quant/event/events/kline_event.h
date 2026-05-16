@@ -18,7 +18,7 @@ struct KlineRow {
     int32_t close_price;
     int64_t volume;
     int64_t amount;
-    int32_t vwap;
+    int64_t vwap;
 };
 static_assert(sizeof(KlineRow) == 48);
 #pragma pack(pop)

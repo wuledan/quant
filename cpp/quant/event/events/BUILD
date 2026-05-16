@@ -14,7 +14,7 @@ cc_library(
         "factor_update_event.h",
     ],
     copts = ["-std=c++20"],
-    deps = ["//cpp/quant/event:event_headers"],
+    deps = ["//cpp/quant/event:event_base_headers"],
 )
 
 cc_library(
@@ -28,5 +28,5 @@ cc_library(
         "factor_update_event.h",
     ],
     copts = ["-std=c++20"],
-    deps = ["//cpp/quant/event:event_headers"],
+    deps = ["//cpp/quant/event:event_base_headers"],
 )

@@ -262,4 +262,3 @@ void set_default_logger(std::unique_ptr<Logger> new_logger) {
 }
 
 }  // namespace quant::infra
-    #pragma GCC diagnostic pop

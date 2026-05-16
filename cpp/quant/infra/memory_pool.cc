@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <new>
 
 namespace quant::infra {
 
@@ -18,6 +19,15 @@ static constexpr size_t kNumSizeClasses = sizeof(kSizeClasses) / sizeof(kSizeCla
 static constexpr size_t kSmallObjectMax = 256;
 static constexpr size_t kMediumObjectMax = 4096;
 static constexpr size_t kBlockSize = 1024 * 1024;  // 1MB blocks from OS
+static constexpr size_t kBlockAlignment = 64;       // cache-line aligned blocks
+
+static char* alloc_block() {
+    return static_cast<char*>(::operator new(kBlockSize, std::align_val_t(kBlockAlignment)));
+}
+
+static void free_block(void* p) {
+    ::operator delete(p, std::align_val_t(kBlockAlignment));
+}
 
 // Find the size class for a given allocation size
 static size_t size_class_index(size_t size) {
@@ -121,6 +131,12 @@ private:
 // ── QuantMemoryResource::Impl ──
 class QuantMemoryResource::Impl {
 public:
+    struct ManagedBlock {
+        void* ptr;
+        size_t capacity;
+        size_t used;
+    };
+
     explicit Impl(const SmallObjectConfig& cfg)
         : config_(cfg)
         , small_free_lists_{}
@@ -129,10 +145,18 @@ public:
         for (size_t i = 0; i < kNumSizeClasses; ++i) {
             small_free_lists_[i] = std::make_unique<SizeClassFreeList>();
         }
+        // Pre-allocate initial blocks
+        for (auto& block : preallocated_blocks_) {
+            block = alloc_block();
+        }
     }
 
     ~Impl() {
-        // Free all allocated blocks
+        // Free pre-allocated blocks
+        for (auto* block : preallocated_blocks_) {
+            if (block) free_block(block);
+        }
+        // Free any individually allocated medium-object blocks
         for (auto* block : allocated_blocks_) {
             ::operator delete(block);
         }
@@ -155,25 +179,31 @@ public:
             size_t class_idx = size_class_index(alloc_size);
             size_t class_size = kSizeClasses[class_idx];
 
-            // Try thread-local free list first
-            // (In production, this would use actual thread-local storage)
-            std::lock_guard<std::mutex> lock(class_mutexes_[class_idx]);
-            ptr = small_free_lists_[class_idx]->pop();
-
+            // Try thread-local cache first (no lock needed)
+            thread_local ThreadLocalCache tls_cache;
+            ptr = tls_cache.allocate(class_idx);
             if (ptr) {
                 stats_.cache_hit_count.fetch_add(1, std::memory_order_relaxed);
                 return ptr;
             }
 
-            // Cache miss — allocate from block
+            // Cache miss — try central free list
+            {
+                std::lock_guard<std::mutex> lock(class_mutexes_[class_idx]);
+                ptr = small_free_lists_[class_idx]->pop();
+            }
+            if (ptr) {
+                stats_.cache_hit_count.fetch_add(1, std::memory_order_relaxed);
+                return ptr;
+            }
+
+            // Central cache miss — allocate from pre-allocated block
             stats_.cache_miss_count.fetch_add(1, std::memory_order_relaxed);
-            ptr = allocate_from_block(class_size);
+            ptr = allocate_from_block(class_size, alignment);
             if (ptr) return ptr;
 
-            // No space in block — allocate directly
-            ptr = ::operator new(class_size);
-            allocated_blocks_.push_back(ptr);
-            return ptr;
+            // Should not reach here (allocate_from_block always succeeds)
+            return nullptr;
         }
 
         // Medium object path (<= 4KB)
@@ -190,9 +220,9 @@ public:
         }
 
         // Large object path — direct allocation
+        // Not tracked in allocated_blocks_ since deallocate() frees directly
         stats_.cache_miss_count.fetch_add(1, std::memory_order_relaxed);
         ptr = ::operator new(alloc_size);
-        allocated_blocks_.push_back(ptr);
         return ptr;
     }
 
@@ -204,11 +234,11 @@ public:
             alloc_size = (alloc_size + alignment - 1) & ~(alignment - 1);
         }
 
-        // Small object
+        // Small object — return to thread-local cache
         if (alloc_size <= kSmallObjectMax) {
             size_t class_idx = size_class_index(alloc_size);
-            std::lock_guard<std::mutex> lock(class_mutexes_[class_idx]);
-            small_free_lists_[class_idx]->push(ptr);
+            thread_local ThreadLocalCache tls_cache;
+            tls_cache.deallocate(ptr, class_idx);
             return;
         }
 
@@ -225,8 +255,8 @@ public:
     void warmup(size_t total_bytes) {
         size_t blocks_needed = (total_bytes + kBlockSize - 1) / kBlockSize;
         for (size_t i = 0; i < blocks_needed; ++i) {
-            void* block = ::operator new(kBlockSize);
-            allocated_blocks_.push_back(block);
+            void* block = alloc_block();
+            preallocated_blocks_.push_back(static_cast<char*>(block));
         }
     }
 
@@ -252,17 +282,48 @@ public:
     }
 
 private:
-    void* allocate_from_block(size_t size) {
-        // Simple bump allocator within blocks
-        // In production, this would manage free spans within blocks
-        void* ptr = ::operator new(size);
+    void* allocate_from_block(size_t size, size_t alignment = 16) {
+        // Align bump offset to satisfy the requested alignment
+        size_t align = std::max(alignment, size_t{16});
+        bump_offset_ = (bump_offset_ + align - 1) & ~(align - 1);
+        size = (size + align - 1) & ~(align - 1);
+
+        // Try current bump block
+        if (bump_block_ptr_ && bump_offset_ + size <= kBlockSize) {
+            void* ptr = bump_block_ptr_ + bump_offset_;
+            bump_offset_ += size;
+            stats_.total_allocated.fetch_add(size, std::memory_order_relaxed);
+            return ptr;
+        }
+
+        // Check if there's another pre-allocated block
+        for (++bump_block_idx_; bump_block_idx_ < preallocated_blocks_.size(); ++bump_block_idx_) {
+            auto* block = preallocated_blocks_[bump_block_idx_];
+            if (block) {
+                bump_block_ptr_ = block;
+                bump_offset_ = size;
+                stats_.total_allocated.fetch_add(size, std::memory_order_relaxed);
+                return block;
+            }
+        }
+
+        // Allocate a new block
+        char* new_block = alloc_block();
+        preallocated_blocks_.push_back(new_block);
+        bump_block_ptr_ = new_block;
+        bump_offset_ = size;
+        bump_block_idx_ = preallocated_blocks_.size() - 1;
         stats_.total_allocated.fetch_add(size, std::memory_order_relaxed);
-        return ptr;
+        return new_block;
     }
 
     SmallObjectConfig config_;
     std::array<std::unique_ptr<SizeClassFreeList>, kNumSizeClasses> small_free_lists_;
     std::array<std::mutex, kNumSizeClasses> class_mutexes_;
+    std::vector<char*> preallocated_blocks_;
+    char* bump_block_ptr_ = nullptr;
+    size_t bump_offset_ = 0;
+    size_t bump_block_idx_ = static_cast<size_t>(-1);
     CentralFreeList central_free_list_;
     std::vector<void*> allocated_blocks_;
 

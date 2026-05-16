@@ -63,7 +63,8 @@ double Histogram::sum() const noexcept {
 }
 
 double Histogram::min() const noexcept {
-    return min_.load(std::memory_order_acquire);
+    double v = min_.load(std::memory_order_acquire);
+    return v == std::numeric_limits<double>::max() ? 0.0 : v;
 }
 
 double Histogram::max() const noexcept {
