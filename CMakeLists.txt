@@ -4,6 +4,7 @@ project(quant_invest LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ── Compiler options ──
 add_compile_options(
@@ -69,6 +70,16 @@ add_library(quant_execution
 target_include_directories(quant_execution PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_execution PUBLIC quant_infra)
 
+# ── scheduler library ──
+add_library(quant_scheduler
+    cpp/quant/scheduler/task_graph.cc
+    cpp/quant/scheduler/wave_scheduler.cc
+    cpp/quant/scheduler/cron_scheduler.cc
+    cpp/quant/scheduler/scheduler_service.cc
+)
+target_include_directories(quant_scheduler PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_scheduler PUBLIC quant_infra)
+
 # ── factor library ──
 add_library(quant_factor
     cpp/quant/factor/factor_registry.cc
@@ -94,6 +105,33 @@ add_library(quant_risk
 )
 target_include_directories(quant_risk PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_risk PUBLIC quant_event)
+
+# ── pybind11 module (optional, requires pybind11 installed) ──
+find_package(pybind11 CONFIG QUIET)
+if(pybind11_FOUND)
+    pybind11_add_module(_quant_core
+        cpp/quant/pybind/pybind_module.cc
+        cpp/quant/pybind/py_storage.cc
+        cpp/quant/pybind/py_factor.cc
+        cpp/quant/pybind/py_execution.cc
+        cpp/quant/pybind/py_risk.cc
+    )
+    target_include_directories(_quant_core PRIVATE ${CMAKE_SOURCE_DIR})
+    target_link_libraries(_quant_core PRIVATE
+        quant_storage
+        quant_factor
+        quant_execution
+        quant_risk
+        quant_event
+        quant_infra
+    )
+    set_target_properties(_quant_core PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/py/src/quant_invest"
+    )
+    message(STATUS "pybind11 found — _quant_core module will be built")
+else()
+    message(STATUS "pybind11 not found — skipping _quant_core module")
+endif()
 
 # ── Tests ──
 include(FetchContent)
@@ -168,3 +206,7 @@ add_test(NAME risk_test COMMAND risk_test)
 add_executable(network_test cpp/test/network_test.cc)
 target_link_libraries(network_test PRIVATE quant_network GTest::gtest_main)
 add_test(NAME network_test COMMAND network_test)
+
+add_executable(scheduler_test cpp/test/scheduler_test.cc)
+target_link_libraries(scheduler_test PRIVATE quant_scheduler GTest::gtest_main)
+add_test(NAME scheduler_test COMMAND scheduler_test)
