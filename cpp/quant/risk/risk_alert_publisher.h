@@ -1,9 +1,7 @@
 // risk_alert_publisher.h — Publishes risk alerts via EventBus
 #pragma once
 
-#include <chrono>
 #include <cstdint>
-#include <memory>
 #include <string>
 
 #include "cpp/quant/event/event_bus.h"
@@ -38,50 +36,15 @@ public:
         : event_bus_(event_bus) {}
 
     // Publish a risk alert as a RiskAlertEvent on the EventBus
-    void publish(const RiskAlert& alert) {
-        auto event = std::make_unique<event::RiskAlertEvent>();
-        event->rule_id = alert.rule_id;
-        event->risk_level = to_risk_level(alert.severity);
-        event->severity = to_rule_severity(alert.severity);
-        event->message = alert.message;
-        event->set_timestamp_us(alert.timestamp_ns / 1000);
-        event_bus_.publish(std::move(event));
-    }
+    void publish(const RiskAlert& alert);
 
     // Convenience: publish from a RiskCheckResult
-    void publish_rejection(const RiskCheckResult& result, AlertSeverity severity = AlertSeverity::kWarning) {
-        RiskAlert alert;
-        alert.rule_id = result.rule_id;
-        alert.rule_name = result.rule_name;
-        alert.severity = severity;
-        alert.message = result.message;
-        alert.value = result.exposure;
-        alert.threshold = result.limit;
-        alert.timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        publish(alert);
-    }
+    void publish_rejection(const RiskCheckResult& result,
+                           AlertSeverity severity = AlertSeverity::kWarning);
 
 private:
-    static event::RiskLevel to_risk_level(AlertSeverity sev) {
-        switch (sev) {
-            case AlertSeverity::kInfo:     return event::RiskLevel::kGreen;
-            case AlertSeverity::kWarning:  return event::RiskLevel::kYellow;
-            case AlertSeverity::kError:    return event::RiskLevel::kRed;
-            case AlertSeverity::kCritical:  return event::RiskLevel::kRed;
-            default:                       return event::RiskLevel::kYellow;
-        }
-    }
-
-    static event::RuleSeverity to_rule_severity(AlertSeverity sev) {
-        switch (sev) {
-            case AlertSeverity::kInfo:     return event::RuleSeverity::kInfo;
-            case AlertSeverity::kWarning:  return event::RuleSeverity::kWarning;
-            case AlertSeverity::kError:    return event::RuleSeverity::kBlock;
-            case AlertSeverity::kCritical:  return event::RuleSeverity::kCircuit;
-            default:                       return event::RuleSeverity::kWarning;
-        }
-    }
+    static event::RiskLevel to_risk_level(AlertSeverity sev);
+    static event::RuleSeverity to_rule_severity(AlertSeverity sev);
 
     event::EventBus& event_bus_;
 };

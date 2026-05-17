@@ -3,11 +3,9 @@
 #include "cpp/quant/event/queue/mpsc_queue.h"
 
 #include <algorithm>
-#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <shared_mutex>
-#include <unordered_map>
 #include <utility>
 
 namespace quant::event {
@@ -28,7 +26,7 @@ struct StatsData {
 };
 
 // ── EventBus::Impl ──
-class EventBus::Impl {
+struct EventBus::Impl {
 public:
     explicit Impl(const EventBus::Options& opts)
         : opts_(opts)
@@ -41,7 +39,7 @@ public:
     }
 
     ~Impl() {
-        stop_async_worker();
+        stop();
     }
 
     SubscriptionId subscribe(EventTypeId type,
@@ -93,10 +91,13 @@ public:
     }
 
     void publish_async(std::unique_ptr<Event> event) {
+        {
+            std::lock_guard<std::mutex> lock(cv_mutex_);
+            async_queue_.enqueue(std::move(event));
+            stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
+        }
         ensure_async_worker();
-        async_queue_.enqueue(std::move(event));
         async_cv_.notify_one();
-        stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
     }
 
     void replay_history(SubscriptionId id, size_t count) {
@@ -114,6 +115,27 @@ public:
         };
     }
 
+    // ── Explicit lifecycle ──
+    void start() {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        if (async_worker_.joinable()) return;  // already running
+        stop_requested_.store(false, std::memory_order_release);
+        async_worker_ = std::thread([this] { async_worker_loop(); });
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(cv_mutex_);
+            stop_requested_.store(true, std::memory_order_release);
+        }
+        async_cv_.notify_one();
+
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        if (async_worker_.joinable()) {
+            async_worker_.join();
+        }
+    }
+
 private:
     void ensure_async_worker() {
         std::lock_guard<std::mutex> lock(worker_mutex_);
@@ -121,34 +143,47 @@ private:
         async_worker_ = std::thread([this] { async_worker_loop(); });
     }
 
-    void stop_async_worker() {
-        {
-            std::lock_guard<std::mutex> lock(cv_mutex_);
-            stop_requested_ = true;
-        }
-        async_cv_.notify_one();
-        std::lock_guard<std::mutex> lock(worker_mutex_);
-        if (async_worker_.joinable()) {
-            async_worker_.join();
-        }
-    }
-
     void async_worker_loop() {
         while (true) {
             std::unique_ptr<Event> event;
+
+            // Drain all available events before waiting
+            while (true) {
+                std::unique_ptr<Event> ev;
+                {
+                    // Dequeue under cv_mutex_ so we synchronize with
+                    // publish_async which also holds cv_mutex_ when
+                    // enqueuing.
+                    std::lock_guard<std::mutex> lock(cv_mutex_);
+                    if (!async_queue_.dequeue(ev)) {
+                        break;
+                    }
+                }
+                if (ev) {
+                    publish(std::move(ev));
+                    stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+
+            // Wait for new events or stop signal
             {
                 std::unique_lock<std::mutex> lock(cv_mutex_);
                 async_cv_.wait(lock, [this] {
-                    return stop_requested_ || !async_queue_.empty();
+                    return stop_requested_.load(std::memory_order_acquire)
+                           || !async_queue_.empty();
                 });
-                if (stop_requested_ && async_queue_.empty()) break;
 
-                (void)async_queue_.dequeue(event);  // SC consumer
-            }
-
-            if (event) {
-                publish(std::move(event));
-                stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
+                if (stop_requested_.load(std::memory_order_acquire)) {
+                    // Drain remaining events before exiting
+                    std::unique_ptr<Event> remaining;
+                    while (async_queue_.dequeue(remaining)) {
+                        if (remaining) {
+                            publish(std::move(remaining));
+                            stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
+                        }
+                    }
+                    return;
+                }
             }
         }
     }
@@ -165,7 +200,7 @@ private:
 
     // Lock-free MPSC async delivery queue
     MPSCQueue<std::unique_ptr<Event>> async_queue_;
-    std::mutex cv_mutex_;              // only used with cv_, not queue
+    std::mutex cv_mutex_;
     std::condition_variable async_cv_;
     std::atomic<bool> stop_requested_{false};
 
@@ -174,7 +209,6 @@ private:
 
     // Stats
     StatsData stats_;
-
 };
 
 // ── EventBus public API ──
@@ -205,6 +239,14 @@ void EventBus::publish_async(std::unique_ptr<Event> event) {
 
 void EventBus::replay_history(SubscriptionId id, size_t count) {
     impl_->replay_history(id, count);
+}
+
+void EventBus::start() {
+    impl_->start();
+}
+
+void EventBus::stop() {
+    impl_->stop();
 }
 
 EventBus::Stats EventBus::stats() const {

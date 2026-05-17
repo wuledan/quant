@@ -57,6 +57,16 @@ public:
     // ── Replay history to subscriber ──
     void replay_history(SubscriptionId id, size_t count);
 
+    // ── Async worker lifecycle ──
+    // Start the background dispatch thread explicitly. If not called,
+    // the worker starts lazily on the first publish_async() call.
+    void start();
+
+    // Stop the background dispatch thread, draining all pending events first.
+    // After stop(), publish_async() will enqueue but not dispatch until
+    // start() is called again.
+    void stop();
+
     // ── Stats ──
     struct Stats {
         uint64_t total_published{0};

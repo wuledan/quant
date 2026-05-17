@@ -223,4 +223,114 @@ private:
     double max_total_value_;
 };
 
+// ── Max position size rule: rejects if order quantity exceeds limit ──
+class MaxPositionSizeRule : public IRiskRule {
+public:
+    explicit MaxPositionSizeRule(double max_position_size)
+        : max_position_size_(max_position_size) {}
+
+    RuleId id() const noexcept override { return 5; }
+    std::string_view name() const noexcept override { return "MaxPositionSize"; }
+
+    RiskCheckResult check(const RiskContext& ctx) const override;
+    bool validate() const noexcept override;
+    double max_position_size() const noexcept { return max_position_size_; }
+
+private:
+    double max_position_size_;
+};
+
+// ── Max order rate rule: rejects if order rate exceeds orders per minute ──
+class MaxOrderRateRule : public IRiskRule {
+public:
+    explicit MaxOrderRateRule(double max_orders_per_minute)
+        : max_orders_per_minute_(max_orders_per_minute) {}
+
+    RuleId id() const noexcept override { return 6; }
+    std::string_view name() const noexcept override { return "MaxOrderRate"; }
+
+    RiskCheckResult check(const RiskContext& ctx) const override;
+    bool validate() const noexcept override;
+    double max_orders_per_minute() const noexcept { return max_orders_per_minute_; }
+
+    // Track order timestamps for rate computation
+    void record_order();
+    void reset_rate();
+
+private:
+    double max_orders_per_minute_;
+    mutable std::vector<int64_t> order_timestamps_ns_;
+};
+
+// ── Trading hours rule: rejects orders outside configured trading hours ──
+class TradingHoursRule : public IRiskRule {
+public:
+    TradingHoursRule(int open_hour, int open_minute,
+                     int close_hour, int close_minute)
+        : open_hour_(open_hour), open_minute_(open_minute),
+          close_hour_(close_hour), close_minute_(close_minute) {}
+
+    RuleId id() const noexcept override { return 7; }
+    std::string_view name() const noexcept override { return "TradingHours"; }
+
+    RiskCheckResult check(const RiskContext& ctx) const override;
+    bool validate() const noexcept override;
+
+    int open_hour() const noexcept { return open_hour_; }
+    int open_minute() const noexcept { return open_minute_; }
+    int close_hour() const noexcept { return close_hour_; }
+    int close_minute() const noexcept { return close_minute_; }
+
+    // Check a specific timestamp (nanoseconds since epoch)
+    bool is_within_hours(int64_t timestamp_ns) const;
+
+private:
+    int open_hour_;
+    int open_minute_;
+    int close_hour_;
+    int close_minute_;
+};
+
+// ── Pre-trade check rule: composite pre-trade validation ──
+class PreTradeCheckRule : public IRiskRule {
+public:
+    PreTradeCheckRule(double max_drawdown_pct,
+                      double max_concentration_pct,
+                      double max_exposure_ratio,
+                      double max_order_value)
+        : max_drawdown_pct_(max_drawdown_pct),
+          max_concentration_pct_(max_concentration_pct),
+          max_exposure_ratio_(max_exposure_ratio),
+          max_order_value_(max_order_value) {}
+
+    RuleId id() const noexcept override { return 8; }
+    std::string_view name() const noexcept override { return "PreTradeCheck"; }
+
+    RiskCheckResult check(const RiskContext& ctx) const override;
+    bool validate() const noexcept override;
+
+private:
+    double max_drawdown_pct_;
+    double max_concentration_pct_;
+    double max_exposure_ratio_;
+    double max_order_value_;
+};
+
+// ── Portfolio risk rule: portfolio-level VaR check ──
+class PortfolioRiskRule : public IRiskRule {
+public:
+    explicit PortfolioRiskRule(double max_var_pct)
+        : max_var_pct_(max_var_pct) {}
+
+    RuleId id() const noexcept override { return 9; }
+    std::string_view name() const noexcept override { return "PortfolioRisk"; }
+
+    RiskCheckResult check(const RiskContext& ctx) const override;
+    bool validate() const noexcept override;
+    double max_var_pct() const noexcept { return max_var_pct_; }
+
+private:
+    double max_var_pct_;
+};
+
 }  // namespace quant::risk
