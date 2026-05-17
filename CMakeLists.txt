@@ -24,6 +24,11 @@ add_library(quant_infra
 target_include_directories(quant_infra PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_features(quant_infra PUBLIC cxx_std_20)
 
+if(QUANT_USE_FOLLY)
+    target_link_libraries(quant_infra PUBLIC Folly::folly)
+    target_compile_definitions(quant_infra PUBLIC QUANT_USE_FOLLY)
+endif()
+
 # ── logging library ──
 add_library(quant_logging
     cpp/quant/infra/logging/logger.cc
@@ -47,6 +52,19 @@ FetchContent_Declare(
     URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz
 )
 FetchContent_MakeAvailable(yaml-cpp)
+
+# ── Folly (optional, for advanced coroutine support) ──
+option(QUANT_USE_FOLLY "Enable Folly coroutine primitives" OFF)
+if(QUANT_USE_FOLLY)
+    FetchContent_Declare(
+        folly
+        GIT_REPOSITORY https://github.com/facebook/folly.git
+        GIT_TAG v2025.05.12.00
+    )
+    set(FOLLY_BUILD_SHARED OFF CACHE BOOL "")
+    set(FOLLY_USE_SIMDHASH OFF CACHE BOOL "")
+    FetchContent_MakeAvailable(folly)
+endif()
 
 # ── config library ──
 add_library(quant_config
@@ -118,6 +136,7 @@ target_link_libraries(quant_network PUBLIC quant_infra)
 add_library(quant_risk
     cpp/quant/risk/risk_engine.cc
     cpp/quant/risk/risk_rule.cc
+    cpp/quant/risk/risk_alert_publisher.cc
 )
 target_include_directories(quant_risk PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_risk PUBLIC quant_event)
@@ -226,3 +245,12 @@ add_test(NAME network_test COMMAND network_test)
 add_executable(scheduler_test cpp/test/scheduler_test.cc)
 target_link_libraries(scheduler_test PRIVATE quant_scheduler GTest::gtest_main)
 add_test(NAME scheduler_test COMMAND scheduler_test)
+
+# ── Coroutine and thread-local stats tests ──
+add_executable(coroutine_test cpp/test/coroutine_test.cc)
+target_link_libraries(coroutine_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME coroutine_test COMMAND coroutine_test)
+
+add_executable(thread_local_stats_test cpp/test/thread_local_stats_test.cc)
+target_link_libraries(thread_local_stats_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME thread_local_stats_test COMMAND thread_local_stats_test)

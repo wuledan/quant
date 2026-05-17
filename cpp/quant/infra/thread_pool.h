@@ -1,4 +1,11 @@
 // thread_pool.h — Work-Stealing thread pool with C++20 coroutine support
+//
+// Key design:
+//   - co_submit() returns PoolAwareAwaiter that resumes the coroutine
+//     on the pool (NOT via detached thread like the old TaskAwaiter)
+//   - enqueue_handle() allows any coroutine_handle to be resumed on
+//     a pool worker thread
+//   - Synchronous submit() is preserved for non-coroutine code
 #pragma once
 
 #include <atomic>
@@ -11,6 +18,7 @@
 #include <ranges>
 #include <string>
 #include <thread>
+#include <variant>
 #include <vector>
 
 namespace quant::infra {
@@ -56,35 +64,58 @@ struct ThreadPoolConfig {
     std::string thread_name_prefix = "quant-pool";
 };
 
-// ── Awaiter: co_await task submission ──
+// ── Shared state for coroutine task completion ──
 template<typename T>
-class TaskAwaiter {
+struct CoTaskState {
+    std::optional<T> result;
+    std::exception_ptr exception;
+    std::coroutine_handle<> waiter{nullptr};
+    std::atomic<bool> completed{false};
+    std::atomic<bool> resumed{false};  // Ensures exactly one resume
+};
+
+template<>
+struct CoTaskState<void> {
+    bool void_completed = false;
+    std::exception_ptr exception;
+    std::coroutine_handle<> waiter{nullptr};
+    std::atomic<bool> completed{false};
+    std::atomic<bool> resumed{false};
+};
+
+// ── PoolAwareAwaiter: co_await result from pool, resume ON the pool ──
+//
+// Replaces the broken TaskAwaiter that spawned a detached thread per
+// co_await. This awaiter:
+//   1. Does NOT create any threads
+//   2. When the submitted task completes, the coroutine handle is
+//      enqueued back to the ThreadPool via enqueue_handle()
+//   3. The coroutine resumes on a pool worker thread
+template<typename T>
+class PoolAwareAwaiter {
 public:
-    explicit TaskAwaiter(std::future<T>&& future) : future_(std::move(future)) {}
+    explicit PoolAwareAwaiter(std::shared_ptr<CoTaskState<T>> state,
+                              class ThreadPool* pool)
+        : state_(std::move(state)), pool_(pool) {}
 
     bool await_ready() const noexcept {
-        return false;
+        return state_->completed.load(std::memory_order_acquire);
     }
 
-    void await_suspend(std::coroutine_handle<> handle) noexcept {
-        handle_ = handle;
-        // Launch a watcher thread that waits for the task result and
-        // then resumes the calling coroutine on the same thread.
-        // In a production system this would be integrated with an
-        // event loop to avoid creating a thread per await.
-        std::thread([this, handle]() mutable {
-            future_.wait();
-            handle.resume();
-        }).detach();
-    }
+    void await_suspend(std::coroutine_handle<> handle) noexcept;
 
     T await_resume() {
-        return future_.get();
+        if (state_->exception) {
+            std::rethrow_exception(state_->exception);
+        }
+        if constexpr (!std::is_void_v<T>) {
+            return std::move(*state_->result);
+        }
     }
 
 private:
-    std::future<T> future_;
-    std::coroutine_handle<> handle_;
+    std::shared_ptr<CoTaskState<T>> state_;
+    ThreadPool* pool_;
 };
 
 // ── Thread pool main class ──
@@ -101,13 +132,21 @@ public:
     template<CallableTask F>
     auto submit(F&& task) -> std::future<std::invoke_result_t<F>>;
 
-    // ── Coroutine submit ──
+    // ── Coroutine submit (replaces old co_submit with TaskAwaiter) ──
+    // The returned PoolAwareAwaiter resumes the caller on a pool worker
+    // when the task completes, WITHOUT creating any extra threads.
     template<CallableTask F>
-    auto co_submit(F&& task) -> TaskAwaiter<std::invoke_result_t<F>>;
+    auto co_submit(F&& task) -> PoolAwareAwaiter<std::invoke_result_t<F>>;
 
     // ── Batch submit ──
     template<std::ranges::range R>
     auto submit_batch(R&& tasks) -> std::vector<std::future<void>>;
+
+    // ── Enqueue a coroutine handle for resumption on a pool worker ──
+    // This is the key primitive: instead of handle.resume() on a
+    // detached thread, we enqueue the handle and a pool worker
+    // calls handle.resume() within the pool's scheduling discipline.
+    void enqueue_handle(std::coroutine_handle<> handle);
 
     // ── Lifecycle ──
     void start();
@@ -120,6 +159,7 @@ public:
         uint64_t tasks_completed;
         uint64_t tasks_stolen;
         uint64_t queue_overflow_count;
+        uint64_t handles_resumed;  // NEW: coroutine handles resumed on pool
     };
     Stats stats() const noexcept;
 
@@ -166,8 +206,33 @@ auto ThreadPool::submit(F&& task) -> std::future<std::invoke_result_t<F>> {
 }
 
 template<CallableTask F>
-auto ThreadPool::co_submit(F&& task) -> TaskAwaiter<std::invoke_result_t<F>> {
-    return TaskAwaiter<std::invoke_result_t<F>>(submit(std::forward<F>(task)));
+auto ThreadPool::co_submit(F&& task) -> PoolAwareAwaiter<std::invoke_result_t<F>> {
+    using ReturnType = std::invoke_result_t<F>;
+    auto state = std::make_shared<CoTaskState<ReturnType>>();
+    auto* pool = this;
+
+    auto wrapper = [task = std::forward<F>(task), state, pool]() mutable {
+        try {
+            if constexpr (std::is_void_v<ReturnType>) {
+                task();
+                state->void_completed = true;
+            } else {
+                state->result.emplace(task());
+            }
+        } catch (...) {
+            state->exception = std::current_exception();
+        }
+
+        // Mark completed and attempt to resume the waiter
+        state->completed.store(true, std::memory_order_release);
+
+        if (state->waiter && !state->resumed.exchange(true, std::memory_order_acq_rel)) {
+            pool->enqueue_handle(state->waiter);
+        }
+    };
+
+    enqueue_task(Task(std::move(wrapper)));
+    return PoolAwareAwaiter<ReturnType>(std::move(state), this);
 }
 
 template<std::ranges::range R>
@@ -178,6 +243,25 @@ auto ThreadPool::submit_batch(R&& tasks) -> std::vector<std::future<void>> {
         futures.push_back(submit(std::forward<decltype(task)>(task)));
     }
     return futures;
+}
+
+// ── PoolAwareAwaiter::await_suspend ──
+// Must be defined after ThreadPool is complete.
+template<typename T>
+void PoolAwareAwaiter<T>::await_suspend(std::coroutine_handle<> handle) noexcept {
+    state_->waiter = handle;
+
+    // If the task already completed (race with the wrapper), we
+    // need to resume the coroutine ourselves.
+    if (state_->completed.load(std::memory_order_acquire)) {
+        if (!state_->resumed.exchange(true, std::memory_order_acq_rel)) {
+            pool_->enqueue_handle(handle);
+        }
+        return;
+    }
+
+    // The wrapper will see state_->waiter and call enqueue_handle
+    // when it completes.  No thread created, no blocking.
 }
 
 }  // namespace quant::infra

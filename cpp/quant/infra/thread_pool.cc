@@ -79,7 +79,7 @@ private:
 };
 
 // ── ThreadPool::Impl ──
-class ThreadPool::Impl {
+struct ThreadPool::Impl {
 public:
     explicit Impl(const ThreadPoolConfig& cfg)
         : config_(cfg)
@@ -181,12 +181,22 @@ public:
         global_cv_.notify_one();
     }
 
+    void enqueue_handle(std::coroutine_handle<> handle) {
+        if (!handle) return;
+        // Wrap the handle in a Task; a pool worker will call handle.resume()
+        stats_.handles_resumed.fetch_add(1, std::memory_order_relaxed);
+        enqueue_task(Task([handle]() mutable {
+            handle.resume();
+        }));
+    }
+
     Stats stats() const noexcept {
         return Stats{
             stats_.tasks_submitted.load(std::memory_order_relaxed),
             stats_.tasks_completed.load(std::memory_order_relaxed),
             stats_.tasks_stolen.load(std::memory_order_relaxed),
             stats_.queue_overflow_count.load(std::memory_order_relaxed),
+            stats_.handles_resumed.load(std::memory_order_relaxed),
         };
     }
 
@@ -255,6 +265,7 @@ private:
         std::atomic<uint64_t> tasks_completed{0};
         std::atomic<uint64_t> tasks_stolen{0};
         std::atomic<uint64_t> queue_overflow_count{0};
+        std::atomic<uint64_t> handles_resumed{0};
     };
     AtomicStats stats_;
 
@@ -284,6 +295,10 @@ bool ThreadPool::is_running() const noexcept { return impl_->is_running(); }
 
 void ThreadPool::enqueue_task(Task task) {
     impl_->enqueue_task(std::move(task));
+}
+
+void ThreadPool::enqueue_handle(std::coroutine_handle<> handle) {
+    impl_->enqueue_handle(handle);
 }
 
 ThreadPool& default_thread_pool() {

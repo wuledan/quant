@@ -108,19 +108,52 @@ TEST(ThreadPoolTest, WorkerCount) {
     EXPECT_EQ(pool.worker_count(), 4);
 }
 
-#ifdef __cpp_coroutines
-TEST(ThreadPoolTest, CoSubmit) {
+TEST(ThreadPoolTest, HandlesResumedInStats) {
     ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
     pool.start();
 
-    auto awaiter = pool.co_submit([]() { return 42; });
-    // For now, co_await isn't used in a coroutine context,
-    // but the TaskAwaiter type should exist
-    EXPECT_TRUE(true);
+    auto stats = pool.stats();
+    EXPECT_EQ(stats.handles_resumed, 0u);
 
     pool.stop();
 }
-#endif
+
+TEST(ThreadPoolTest, CoSubmitProducesPoolAwareAwaiter) {
+    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
+    pool.start();
+
+    // co_submit returns PoolAwareAwaiter, not the old TaskAwaiter
+    auto awaiter = pool.co_submit([]() { return 42; });
+
+    // Give the task time to complete
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    pool.stop();
+}
+
+TEST(ThreadPoolTest, EnqueueHandle) {
+    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
+    pool.start();
+
+    // co_submit without co_await: the task runs on the pool,
+    // but since no coroutine is awaiting, no handle is enqueued back.
+    // This tests the basic co_submit path.
+    std::atomic<int> counter{0};
+    for (int i = 0; i < 10; ++i) {
+        auto awaiter = pool.co_submit([&counter]() {
+            counter.fetch_add(1);
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(counter.load(), 10);
+
+    // Without a coroutine waiter, handles_resumed stays 0
+    auto stats = pool.stats();
+    EXPECT_EQ(stats.handles_resumed, 0u);
+
+    pool.stop();
+}
 
 }  // namespace
 }  // namespace quant::infra
