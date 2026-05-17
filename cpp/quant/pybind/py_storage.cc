@@ -126,6 +126,45 @@ void bind_storage(py::module_& m) {
         .def_readwrite("begin_ts", &TimeRange::begin_ts)
         .def_readwrite("end_ts", &TimeRange::end_ts);
 
+    // ── KlineRow (must be before StorageEngine) ──
+    py::class_<quant::event::KlineRow>(m, "KlineRow")
+        .def(py::init<>())
+        .def_readwrite("timestamp", &quant::event::KlineRow::timestamp)
+        .def_readwrite("open_price", &quant::event::KlineRow::open_price)
+        .def_readwrite("high_price", &quant::event::KlineRow::high_price)
+        .def_readwrite("low_price", &quant::event::KlineRow::low_price)
+        .def_readwrite("close_price", &quant::event::KlineRow::close_price)
+        .def_readwrite("volume", &quant::event::KlineRow::volume)
+        .def_readwrite("amount", &quant::event::KlineRow::amount)
+        .def_readwrite("vwap", &quant::event::KlineRow::vwap)
+        .def("__repr__", [](const quant::event::KlineRow& r) {
+            return "<KlineRow ts=" + std::to_string(r.timestamp)
+                   + " O=" + std::to_string(r.open_price)
+                   + " H=" + std::to_string(r.high_price)
+                   + " L=" + std::to_string(r.low_price)
+                   + " C=" + std::to_string(r.close_price)
+                   + " V=" + std::to_string(r.volume) + ">";
+        });
+
+    // ── DataType enum (must be before StorageEngine) ──
+    py::enum_<quant::event::DataType>(m, "DataType")
+        .value("KLINE_1MIN", quant::event::DataType::kKline1Min)
+        .value("KLINE_5MIN", quant::event::DataType::kKline5Min)
+        .value("KLINE_15MIN", quant::event::DataType::kKline15Min)
+        .value("KLINE_30MIN", quant::event::DataType::kKline30Min)
+        .value("KLINE_60MIN", quant::event::DataType::kKline60Min)
+        .value("KLINE_DAY", quant::event::DataType::kKlineDay)
+        .value("TICK", quant::event::DataType::kTick)
+        .export_values();
+
+    // ── StorageEngine::Options (must be before StorageEngine) ──
+    py::class_<StorageEngine::Options>(m, "StorageEngineOptions")
+        .def(py::init<>())
+        .def(py::init<size_t, std::string>(),
+             py::arg("cache_budget_mb"), py::arg("data_dir"))
+        .def_readwrite("cache_budget_mb", &StorageEngine::Options::cache_budget_mb)
+        .def_readwrite("data_dir", &StorageEngine::Options::data_dir);
+
     // ── TimeSeriesStore ──
     py::class_<TimeSeriesStore>(m, "TimeSeriesStore")
         .def(py::init<size_t, std::filesystem::path>(),
@@ -154,45 +193,6 @@ void bind_storage(py::module_& m) {
              py::arg("field"), py::arg("range"))
         .def("flush", &StorageEngine::flush)
         .def("close", &StorageEngine::close);
-
-    // ── StorageEngine::Options ──
-    py::class_<StorageEngine::Options>(m, "StorageEngineOptions")
-        .def(py::init<>())
-        .def(py::init<size_t, std::string>(),
-             py::arg("cache_budget_mb"), py::arg("data_dir"))
-        .def_readwrite("cache_budget_mb", &StorageEngine::Options::cache_budget_mb)
-        .def_readwrite("data_dir", &StorageEngine::Options::data_dir);
-
-    // ── KlineRow (read-only view for Python) ──
-    py::class_<quant::event::KlineRow>(m, "KlineRow")
-        .def(py::init<>())
-        .def_readwrite("timestamp", &quant::event::KlineRow::timestamp)
-        .def_readwrite("open_price", &quant::event::KlineRow::open_price)
-        .def_readwrite("high_price", &quant::event::KlineRow::high_price)
-        .def_readwrite("low_price", &quant::event::KlineRow::low_price)
-        .def_readwrite("close_price", &quant::event::KlineRow::close_price)
-        .def_readwrite("volume", &quant::event::KlineRow::volume)
-        .def_readwrite("amount", &quant::event::KlineRow::amount)
-        .def_readwrite("vwap", &quant::event::KlineRow::vwap)
-        .def("__repr__", [](const quant::event::KlineRow& r) {
-            return "<KlineRow ts=" + std::to_string(r.timestamp)
-                   + " O=" + std::to_string(r.open_price)
-                   + " H=" + std::to_string(r.high_price)
-                   + " L=" + std::to_string(r.low_price)
-                   + " C=" + std::to_string(r.close_price)
-                   + " V=" + std::to_string(r.volume) + ">";
-        });
-
-    // ── DataType enum ──
-    py::enum_<quant::event::DataType>(m, "DataType")
-        .value("KLINE_1MIN", quant::event::DataType::kKline1Min)
-        .value("KLINE_5MIN", quant::event::DataType::kKline5Min)
-        .value("KLINE_15MIN", quant::event::DataType::kKline15Min)
-        .value("KLINE_30MIN", quant::event::DataType::kKline30Min)
-        .value("KLINE_60MIN", quant::event::DataType::kKline60Min)
-        .value("KLINE_DAY", quant::event::DataType::kKlineDay)
-        .value("TICK", quant::event::DataType::kTick)
-        .export_values();
 }
 
 }  // namespace quant::pybind

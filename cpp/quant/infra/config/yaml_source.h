@@ -15,6 +15,7 @@ public:
 
     std::string_view name() const noexcept override { return "yaml"; }
     bool load(std::map<std::string, ConfigValue>& kv) override;
+    bool save(const std::map<std::string, ConfigValue>& kv);
 
 private:
     std::string file_path_;

@@ -34,14 +34,29 @@ add_library(quant_logging
 target_include_directories(quant_logging PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_logging PUBLIC quant_infra)
 
+# ── toml11 (header-only) ──
+set(TOML11_INCLUDE_DIR /home/wuledan/work/3FS/third_party/toml11)
+if(NOT EXISTS ${TOML11_INCLUDE_DIR}/toml.hpp)
+    message(FATAL_ERROR "toml11 not found at ${TOML11_INCLUDE_DIR}")
+endif()
+
+# ── yaml-cpp ──
+include(FetchContent)
+FetchContent_Declare(
+    yaml-cpp
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
 # ── config library ──
 add_library(quant_config
     cpp/quant/infra/config/config_manager.cc
+    cpp/quant/infra/config/config_validator.cc
     cpp/quant/infra/config/yaml_source.cc
     cpp/quant/infra/config/toml_source.cc
 )
-target_include_directories(quant_config PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(quant_config PUBLIC quant_infra)
+target_include_directories(quant_config PUBLIC ${CMAKE_SOURCE_DIR} ${TOML11_INCLUDE_DIR})
+target_link_libraries(quant_config PUBLIC quant_infra yaml-cpp::yaml-cpp)
 
 # ── event library ──
 add_library(quant_event
@@ -102,6 +117,7 @@ target_link_libraries(quant_network PUBLIC quant_infra)
 # ── risk library ──
 add_library(quant_risk
     cpp/quant/risk/risk_engine.cc
+    cpp/quant/risk/risk_rule.cc
 )
 target_include_directories(quant_risk PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_risk PUBLIC quant_event)

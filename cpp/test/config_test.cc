@@ -1,9 +1,12 @@
 // config_test.cc — Tests for ConfigManager with layering, hot reload, and subscription
 #include "cpp/quant/infra/config/config_manager.h"
 #include "cpp/quant/infra/config/config_source.h"
+#include "cpp/quant/infra/config/toml_source.h"
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <thread>
 
@@ -200,6 +203,158 @@ TEST(ConfigManagerTest, LoadGlobalFailsGracefully) {
     ConfigManager cm;
     // No-op: just verify default state
     EXPECT_FALSE(cm.get<int64_t>("any").has_value());
+}
+
+
+// ── TOML Config Source Tests ──
+
+TEST(TomlConfigSourceTest, LoadSimpleTypes) {
+    // Write a temporary TOML file
+    auto tmp = std::filesystem::temp_directory_path() / "test_simple.toml";
+    {
+        std::ofstream ofs(tmp);
+        ofs << R"(
+host = "localhost"
+port = 8080
+timeout = 30.5
+debug = true
+)";
+    }
+
+    TomlConfigSource source(tmp.string());
+    std::map<std::string, ConfigValue> kv;
+    ASSERT_TRUE(source.load(kv));
+
+    EXPECT_EQ(std::get<std::string>(kv["host"]), "localhost");
+    EXPECT_EQ(std::get<int64_t>(kv["port"]), 8080);
+    EXPECT_DOUBLE_EQ(std::get<double>(kv["timeout"]), 30.5);
+    EXPECT_EQ(std::get<bool>(kv["debug"]), true);
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(TomlConfigSourceTest, LoadNestedKeys) {
+    auto tmp = std::filesystem::temp_directory_path() / "test_nested.toml";
+    {
+        std::ofstream ofs(tmp);
+        ofs << R"(
+[database]
+host = "db.example.com"
+port = 5432
+
+[redis]
+host = "redis.example.com"
+port = 6379
+db = 0
+)";
+    }
+
+    TomlConfigSource source(tmp.string());
+    std::map<std::string, ConfigValue> kv;
+    ASSERT_TRUE(source.load(kv));
+
+    EXPECT_EQ(std::get<std::string>(kv["database.host"]), "db.example.com");
+    EXPECT_EQ(std::get<int64_t>(kv["database.port"]), 5432);
+    EXPECT_EQ(std::get<std::string>(kv["redis.host"]), "redis.example.com");
+    EXPECT_EQ(std::get<int64_t>(kv["redis.port"]), 6379);
+    EXPECT_EQ(std::get<int64_t>(kv["redis.db"]), 0);
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(TomlConfigSourceTest, LoadArrays) {
+    auto tmp = std::filesystem::temp_directory_path() / "test_arrays.toml";
+    {
+        std::ofstream ofs(tmp);
+        ofs << R"(
+ids = [1, 2, 3]
+prices = [10.5, 20.3, 30.1]
+nodes = ["nyc", "london", "tokyo"]
+flags = [true, false, true]
+)";
+    }
+
+    TomlConfigSource source(tmp.string());
+    std::map<std::string, ConfigValue> kv;
+    ASSERT_TRUE(source.load(kv));
+
+    auto ids = std::get<std::vector<int64_t>>(kv["ids"]);
+    ASSERT_EQ(ids.size(), 3);
+    EXPECT_EQ(ids[0], 1);
+    EXPECT_EQ(ids[2], 3);
+
+    auto prices = std::get<std::vector<double>>(kv["prices"]);
+    ASSERT_EQ(prices.size(), 3);
+    EXPECT_DOUBLE_EQ(prices[1], 20.3);
+
+    auto nodes = std::get<std::vector<std::string>>(kv["nodes"]);
+    ASSERT_EQ(nodes.size(), 3);
+    EXPECT_EQ(nodes[2], "tokyo");
+
+    auto flags = std::get<std::vector<bool>>(kv["flags"]);
+    ASSERT_EQ(flags.size(), 3);
+    EXPECT_TRUE(flags[0]);
+    EXPECT_FALSE(flags[1]);
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(TomlConfigSourceTest, FileNotFound) {
+    TomlConfigSource source("/nonexistent/path.toml");
+    std::map<std::string, ConfigValue> kv;
+    EXPECT_FALSE(source.load(kv));
+}
+
+TEST(TomlConfigSourceTest, SaveAndReload) {
+    auto tmp = std::filesystem::temp_directory_path() / "test_save.toml";
+    {
+        std::map<std::string, ConfigValue> kv;
+        kv["host"] = std::string{"example.com"};
+        kv["port"] = int64_t{443};
+        kv["database.name"] = std::string{"mydb"};
+        kv["database.pool"] = int64_t{10};
+
+        TomlConfigSource source(tmp.string());
+        ASSERT_TRUE(source.save(kv));
+    }
+
+    // Reload and verify
+    {
+        TomlConfigSource source(tmp.string());
+        std::map<std::string, ConfigValue> kv;
+        ASSERT_TRUE(source.load(kv));
+
+        EXPECT_EQ(std::get<std::string>(kv["host"]), "example.com");
+        EXPECT_EQ(std::get<int64_t>(kv["port"]), 443);
+        EXPECT_EQ(std::get<std::string>(kv["database.name"]), "mydb");
+        EXPECT_EQ(std::get<int64_t>(kv["database.pool"]), 10);
+    }
+
+    std::filesystem::remove(tmp);
+}
+
+TEST(TomlConfigSourceTest, IntegrateWithConfigManager) {
+    auto tmp = std::filesystem::temp_directory_path() / "test_integrate.toml";
+    {
+        std::ofstream ofs(tmp);
+        ofs << R"(
+host = "api.example.com"
+port = 9999
+)";
+    }
+
+    ConfigManager cm;
+    ASSERT_TRUE(cm.load_global(std::make_unique<TomlConfigSource>(tmp.string())));
+
+    auto host = cm.get<std::string>("host");
+    ASSERT_TRUE(host.has_value());
+    EXPECT_EQ(*host, "api.example.com");
+
+    auto port = cm.get<int64_t>("port");
+    ASSERT_TRUE(port.has_value());
+    EXPECT_EQ(*port, 9999);
+
+    std::filesystem::remove(tmp);
 }
 
 }  // namespace
