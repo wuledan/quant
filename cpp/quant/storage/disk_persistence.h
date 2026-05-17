@@ -13,6 +13,13 @@
 
 namespace quant::storage {
 
+// ── Sync mode for write durability ──
+enum class SyncMode : uint8_t {
+    kAsync = 0,    // No fsync (default, fastest)
+    kSync = 1,     // fsync after every write
+    kPeriodic = 2, // fsync periodically via flush()
+};
+
 // ── On-disk segment file constants ──
 constexpr uint32_t kSegmentMagic = 0x51554E54;  // "QUNT"
 constexpr uint32_t kSegmentVersion = 1;
@@ -49,7 +56,8 @@ static_assert(sizeof(BlockIndexEntry) == kBlockIndexSize);
 // ── DiskPersistence: manages segment files on disk ──
 class DiskPersistence {
 public:
-    explicit DiskPersistence(std::filesystem::path data_dir);
+    explicit DiskPersistence(std::filesystem::path data_dir,
+                             SyncMode sync_mode = SyncMode::kAsync);
     ~DiskPersistence();
 
     DiskPersistence(const DiskPersistence&) = delete;
@@ -80,13 +88,16 @@ public:
     void flush();
 
     const std::filesystem::path& data_dir() const noexcept { return data_dir_; }
+    SyncMode sync_mode() const noexcept { return sync_mode_; }
 
 private:
+    static void do_fsync(int fd);
     std::string segment_filename(std::string_view symbol,
                                   uint8_t data_type,
                                   int64_t begin_ts) const;
 
     std::filesystem::path data_dir_;
+    SyncMode sync_mode_;
 };
 
 }  // namespace quant::storage

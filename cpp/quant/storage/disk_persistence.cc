@@ -5,10 +5,17 @@
 #include <cstring>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace quant::storage {
 
-DiskPersistence::DiskPersistence(std::filesystem::path data_dir)
-    : data_dir_(std::move(data_dir)) {
+DiskPersistence::DiskPersistence(std::filesystem::path data_dir, SyncMode sync_mode)
+    : data_dir_(std::move(data_dir)), sync_mode_(sync_mode) {
     if (!std::filesystem::exists(data_dir_)) {
         std::filesystem::create_directories(data_dir_);
     }
@@ -74,6 +81,16 @@ std::string DiskPersistence::write_segment(
     }
 
     ofs.close();
+
+    if (sync_mode_ == SyncMode::kSync) {
+        // Open with POSIX fd for fsync
+        int fd = ::open(fpath.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            do_fsync(fd);
+            ::close(fd);
+        }
+    }
+
     return fname;
 }
 
@@ -174,8 +191,26 @@ bool DiskPersistence::delete_segment(std::string_view filename) {
 }
 
 void DiskPersistence::flush() {
-    // ofstream writes are OS-buffered; nothing additional to do
-    // In production we would call fsync() on the directory fd
+    if (sync_mode_ == SyncMode::kPeriodic) {
+        // fsync all segment files in data directory
+        if (!std::filesystem::exists(data_dir_)) return;
+        for (const auto& entry : std::filesystem::directory_iterator(data_dir_)) {
+            if (!entry.is_regular_file() || !entry.path().string().ends_with(".seg")) continue;
+            int fd = ::open(entry.path().c_str(), O_RDONLY);
+            if (fd >= 0) {
+                do_fsync(fd);
+                ::close(fd);
+            }
+        }
+    }
+}
+
+void DiskPersistence::do_fsync(int fd) {
+#ifdef _WIN32
+    _commit(fd);
+#else
+    ::fsync(fd);
+#endif
 }
 
 }  // namespace quant::storage

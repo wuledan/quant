@@ -41,7 +41,11 @@ public:
 
     void evict(std::string_view symbol, quant::event::DataType type);
 
+    // Evict least-recently-used entries until memory is under target_bytes
+    void evict(size_t target_bytes);
+
     size_t used_memory() const noexcept { return total_memory_.load(std::memory_order_relaxed); }
+    size_t memory_usage() const noexcept { return total_memory_.load(std::memory_order_relaxed); }
     size_t memory_budget() const noexcept { return memory_budget_; }
     size_t shard_count() const noexcept { return kShardCount; }
 

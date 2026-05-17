@@ -32,6 +32,11 @@ void TimeSeriesCache::append(std::string_view symbol,
         shard.memory_used += mem;
     }
     total_memory_.fetch_add(mem, std::memory_order_relaxed);
+
+    // Auto-evict if over budget
+    if (total_memory_.load(std::memory_order_relaxed) > memory_budget_) {
+        evict(memory_budget_ * 80 / 100);  // evict down to 80% of budget
+    }
 }
 
 std::vector<ColumnBlock> TimeSeriesCache::query(
@@ -86,6 +91,53 @@ void TimeSeriesCache::evict(std::string_view symbol, quant::event::DataType type
             size_t freed = before - shard.memory_used;
             total_memory_.fetch_sub(freed, std::memory_order_relaxed);
         }
+    }
+}
+
+void TimeSeriesCache::evict(size_t target_bytes) {
+    // Collect all entries across shards with their access timestamps
+    struct EntryInfo {
+        CacheKey key;
+        uint64_t access_time;
+        size_t memory;
+        size_t shard_idx;
+    };
+
+    std::vector<EntryInfo> entries;
+
+    for (size_t i = 0; i < kShardCount; ++i) {
+        auto& shard = *shards_[i];
+        std::shared_lock lock(shard.rwlock);
+        for (const auto& [key, blocks] : shard.columns) {
+            auto it = shard.last_access.find(key);
+            uint64_t at = (it != shard.last_access.end()) ? it->second : 0;
+            entries.push_back(EntryInfo{key, at, shard.memory_used, i});
+        }
+    }
+
+    // Sort by access time ascending (LRU first)
+    std::sort(entries.begin(), entries.end(),
+        [](const EntryInfo& a, const EntryInfo& b) {
+            return a.access_time < b.access_time;
+        });
+
+    // Evict entries until under budget
+    size_t current = total_memory_.load(std::memory_order_relaxed);
+    for (const auto& entry : entries) {
+        if (current <= target_bytes) break;
+
+        auto& shard = *shards_[entry.shard_idx];
+        std::unique_lock lock(shard.rwlock);
+
+        auto it = shard.columns.find(entry.key);
+        if (it == shard.columns.end()) continue;
+
+        size_t before = shard.memory_used;
+        shard.columns.erase(it);
+        shard.last_access.erase(entry.key);
+        size_t freed = before - shard.memory_used;
+        current -= freed;
+        total_memory_.fetch_sub(freed, std::memory_order_relaxed);
     }
 }
 
