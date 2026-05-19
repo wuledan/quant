@@ -9,9 +9,13 @@
 #include <string>
 #include <vector>
 
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/infra/time_utils.h"
 
 namespace quant::network {
+
+class CoIouring;
+using infra::CoTask;
 
 // ── Connection state ──
 enum class TcpState : uint8_t {
@@ -104,6 +108,15 @@ public:
     void set_callbacks(TcpCallbacks callbacks) { callbacks_ = std::move(callbacks); }
     void set_on_data(std::function<void(const char*, size_t)> cb) { callbacks_.on_data = std::move(cb); }
 
+    // ── CoIouring integration ──
+    void set_io_uring(CoIouring* ring) noexcept { ring_ = ring; }
+
+    // ── Coroutine I/O (requires CoIouring) ──
+    CoTask<bool> co_connect();
+    CoTask<size_t> co_send(const char* data, size_t len);
+    CoTask<size_t> co_send(const std::string& data);
+    CoTask<size_t> co_recv(char* buf, size_t len);
+
     // ── Read/write buffers ──
     IoBuffer& read_buffer() noexcept { return read_buf_; }
     IoBuffer& write_buffer() noexcept { return write_buf_; }
@@ -124,6 +137,7 @@ private:
     IoBuffer write_buf_;
     int reconnect_attempts_ = 0;
     infra::Timestamp last_activity_;
+    CoIouring* ring_{nullptr};
 };
 
 }  // namespace quant::network

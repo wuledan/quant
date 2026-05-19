@@ -3,18 +3,19 @@
 
 #include <atomic>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "cpp/quant/execution/order.h"
 #include "cpp/quant/execution/order_state_machine.h"
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/infra/error_codes.h"
 
 namespace quant::execution {
 
 using infra::Result;
+using infra::CoTask;
 
 // ── Order creation request ──
 struct OrderRequest {
@@ -55,12 +56,23 @@ public:
     OrderManager(const OrderManager&) = delete;
     OrderManager& operator=(const OrderManager&) = delete;
 
-    // ── Order operations ──
+    // ── Coroutine hot-path operations ──
+    CoTask<Result<OrderId>> co_create_order(const OrderRequest& req);
+    CoTask<Result<void>>    co_cancel_order(OrderId order_id);
+    CoTask<Result<void>>    co_modify_order(const OrderModifyRequest& req);
+
+    // ── Coroutine order state updates ──
+    CoTask<Result<void>> co_on_order_accepted(OrderId order_id, std::string broker_order_id);
+    CoTask<Result<void>> co_on_order_rejected(OrderId order_id, std::string reason);
+    CoTask<Result<void>> co_on_order_fill(OrderId order_id, int64_t fill_qty, int64_t fill_price);
+    CoTask<Result<void>> co_on_order_cancelled(OrderId order_id);
+    CoTask<Result<void>> co_on_order_expired(OrderId order_id);
+    CoTask<Result<void>> co_on_order_suspended(OrderId order_id);
+
+    // ── Sync wrappers (for non-coroutine callers) ──
     Result<OrderId> create_order(const OrderRequest& req);
     Result<void>    cancel_order(OrderId order_id);
     Result<void>    modify_order(const OrderModifyRequest& req);
-
-    // ── Order state updates (from broker/exchange) ──
     Result<void> on_order_accepted(OrderId order_id, std::string broker_order_id);
     Result<void> on_order_rejected(OrderId order_id, std::string reason);
     Result<void> on_order_fill(OrderId order_id, int64_t fill_qty, int64_t fill_price);
@@ -83,10 +95,11 @@ private:
         return seq_.fetch_add(1, std::memory_order_relaxed);
     }
 
+    CoTask<Result<void>> co_apply_transition(OrderId order_id, OrderStatus new_status);
     Result<void> apply_transition(OrderId order_id, OrderStatus new_status);
 
     std::atomic<OrderId> seq_{1};
-    mutable std::mutex mutex_;
+    mutable infra::CoMutex mutex_;
 
     // Primary index: order_id -> Order
     std::unordered_map<OrderId, Order> orders_;

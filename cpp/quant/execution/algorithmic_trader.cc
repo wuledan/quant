@@ -31,20 +31,34 @@ void AlgorithmicTrader::stop() noexcept {
     running_.store(false, std::memory_order_relaxed);
 }
 
-void AlgorithmicTrader::on_fill(const FillReport& report) {
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<void> AlgorithmicTrader::co_on_fill(const FillReport& report) {
+    auto lock = co_await mutex_.co_scoped_lock();
     total_filled_ += report.fill_quantity;
     total_value_ += report.fill_quantity * report.fill_price;
 }
 
+void AlgorithmicTrader::on_fill(const FillReport& report) {
+    folly::coro::blockingWait(co_on_fill(report));
+}
+
 AlgorithmicTrader::Stats AlgorithmicTrader::stats() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     Stats s;
     s.parent_order_id = parent_order_id_;
     s.total_filled = total_filled_;
     s.total_slices = total_slices_;
     s.total_value = total_value_;
     return s;
+}
+
+CoTask<AlgorithmicTrader::Stats> AlgorithmicTrader::co_stats() const noexcept {
+    auto lock = co_await mutex_.co_scoped_lock();
+    Stats s;
+    s.parent_order_id = parent_order_id_;
+    s.total_filled = total_filled_;
+    s.total_slices = total_slices_;
+    s.total_value = total_value_;
+    co_return s;
 }
 
 OrderId AlgorithmicTrader::submit_slice(int64_t quantity) {
@@ -61,20 +75,38 @@ OrderId AlgorithmicTrader::submit_slice(int64_t quantity) {
     return result.ok() ? result.value() : 0;
 }
 
+CoTask<OrderId> AlgorithmicTrader::co_submit_slice(int64_t quantity) {
+    OrderRequest req;
+    req.symbol = config_.symbol;
+    req.side = config_.side;
+    req.type = config_.limit_price > 0 ? OrderType::kLimit : OrderType::kMarket;
+    req.price = config_.limit_price;
+    req.quantity = quantity;
+    req.tif = TimeInForce::kIOC;
+
+    auto result = co_await order_manager_.co_create_order(req);
+    ++total_slices_;
+    co_return result.ok() ? result.value() : 0;
+}
+
 // ── TWAP ──
 void TwapTrader::on_tick(int64_t now_ns) {
-    if (!running_.load(std::memory_order_relaxed)) return;
-    if (config_.total_quantity <= total_filled_) return;
+    folly::coro::blockingWait(co_on_tick(now_ns));
+}
 
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<void> TwapTrader::co_on_tick(int64_t now_ns) {
+    if (!running_.load(std::memory_order_relaxed)) co_return;
+    if (config_.total_quantity <= total_filled_) co_return;
+
+    auto lock = co_await mutex_.co_scoped_lock();
 
     int64_t elapsed = now_ns - last_slice_time_ns_;
-    if (elapsed < slice_interval_.count()) return;
+    if (elapsed < slice_interval_.count()) co_return;
 
     int64_t remaining = config_.total_quantity - total_filled_;
     int64_t qty = calc_slice_qty(remaining, now_ns);
     if (qty > 0) {
-        submit_slice(qty);
+        co_await co_submit_slice(qty);
         last_slice_time_ns_ = now_ns;
     }
 }
@@ -99,18 +131,22 @@ void VwapTrader::set_volume_profile(const std::vector<double>& weights) {
 }
 
 void VwapTrader::on_tick(int64_t now_ns) {
-    if (!running_.load(std::memory_order_relaxed)) return;
-    if (config_.total_quantity <= total_filled_) return;
+    folly::coro::blockingWait(co_on_tick(now_ns));
+}
 
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<void> VwapTrader::co_on_tick(int64_t now_ns) {
+    if (!running_.load(std::memory_order_relaxed)) co_return;
+    if (config_.total_quantity <= total_filled_) co_return;
+
+    auto lock = co_await mutex_.co_scoped_lock();
 
     int64_t elapsed = now_ns - last_slice_time_ns_;
-    if (elapsed < slice_interval_.count()) return;
+    if (elapsed < slice_interval_.count()) co_return;
 
     int64_t remaining = config_.total_quantity - total_filled_;
     int64_t qty = calc_slice_qty(remaining, now_ns);
     if (qty > 0) {
-        submit_slice(qty);
+        co_await co_submit_slice(qty);
         last_slice_time_ns_ = now_ns;
     }
 }
@@ -128,15 +164,19 @@ int64_t VwapTrader::calc_slice_qty(int64_t remaining, int64_t /*now_ns*/) {
 
 // ── PoV ──
 void PovTrader::on_tick(int64_t now_ns) {
-    if (!running_.load(std::memory_order_relaxed)) return;
-    if (config_.total_quantity <= total_filled_) return;
+    folly::coro::blockingWait(co_on_tick(now_ns));
+}
 
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<void> PovTrader::co_on_tick(int64_t now_ns) {
+    if (!running_.load(std::memory_order_relaxed)) co_return;
+    if (config_.total_quantity <= total_filled_) co_return;
+
+    auto lock = co_await mutex_.co_scoped_lock();
 
     int64_t remaining = config_.total_quantity - total_filled_;
     int64_t qty = calc_slice_qty(remaining, now_ns);
     if (qty > 0) {
-        submit_slice(qty);
+        co_await co_submit_slice(qty);
     }
 }
 

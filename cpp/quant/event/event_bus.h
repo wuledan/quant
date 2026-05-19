@@ -1,4 +1,4 @@
-// event_bus.h — EventBus: publish-subscribe intra-process messaging
+// event_bus.h — EventBus: publish-subscribe intra-process messaging (coroutine-aware)
 #pragma once
 
 #include <atomic>
@@ -7,11 +7,11 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "cpp/quant/event/event.h"
-#include "cpp/quant/event/event_filter.h"
+#include "coroutine.h"
+#include "event.h"
+#include "event_filter.h"
 
 namespace quant::event {
 
@@ -22,6 +22,13 @@ class IEventSubscriber {
 public:
     virtual ~IEventSubscriber() = default;
     virtual void on_event(const Event& event) = 0;
+};
+
+// ── Coroutine subscriber interface (async callback) ──
+class ICoEventSubscriber {
+public:
+    virtual ~ICoEventSubscriber() = default;
+    virtual quant::infra::CoTask<void> on_event_async(const Event& event) = 0;
 };
 
 // ── EventBus ──
@@ -42,9 +49,16 @@ public:
     EventBus(const EventBus&) = delete;
     EventBus& operator=(const EventBus&) = delete;
 
-    // ── Publish ──
+    // ── Synchronous publish ──
     void publish(std::unique_ptr<Event> event);
+
+    // ── Async publish (thread-based, legacy) ──
     void publish_async(std::unique_ptr<Event> event);
+
+    // ── Coroutine publish ──
+    // Enqueues and signals a coroutine dispatcher. Requires the event bus
+    // to have been started with start_async().
+    quant::infra::CoTask<void> co_publish(std::unique_ptr<Event> event);
 
     // ── Subscribe ──
     SubscriptionId subscribe(EventTypeId type,
@@ -57,15 +71,15 @@ public:
     // ── Replay history to subscriber ──
     void replay_history(SubscriptionId id, size_t count);
 
-    // ── Async worker lifecycle ──
-    // Start the background dispatch thread explicitly. If not called,
-    // the worker starts lazily on the first publish_async() call.
+    // ── Worker lifecycle ──
     void start();
-
-    // Stop the background dispatch thread, draining all pending events first.
-    // After stop(), publish_async() will enqueue but not dispatch until
-    // start() is called again.
     void stop();
+
+    // ── Coroutine-based dispatch loop ──
+    // Runs the dispatch loop on the given executor. Must be called before
+    // co_publish will deliver events.
+    quant::infra::CoTask<void>
+    start_async(quant::infra::WorkStealingExecutor& executor);
 
     // ── Stats ──
     struct Stats {

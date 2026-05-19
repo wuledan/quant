@@ -5,13 +5,15 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/risk/risk_rule.h"
 
 namespace quant::risk {
+
+using infra::CoTask;
 
 // ── Circuit breaker config ──
 struct CircuitBreakerConfig {
@@ -41,13 +43,19 @@ public:
     RiskEngine(const RiskEngine&) = delete;
     RiskEngine& operator=(const RiskEngine&) = delete;
 
-    // ── Rule management ──
+    // ── Rule management (sync) ──
     void register_rule(std::unique_ptr<IRiskRule> rule);
     void unregister_rule(RuleId id);
     IRiskRule* find_rule(RuleId id) const;
     std::vector<IRiskRule*> all_rules() const;
 
-    // ── Risk check: returns combined result ──
+    // ── Rule management (coroutine) ──
+    CoTask<void> co_register_rule(std::unique_ptr<IRiskRule> rule);
+    CoTask<void> co_unregister_rule(RuleId id);
+    CoTask<IRiskRule*> co_find_rule(RuleId id) const;
+    CoTask<std::vector<IRiskRule*>> co_all_rules() const;
+
+    // ── Risk check (sync) ──
     // If any rule rejects, the overall result is rejection.
     // The results vector contains all individual rule results.
     struct CheckResult {
@@ -56,6 +64,9 @@ public:
     };
 
     CheckResult check(const RiskContext& ctx);
+
+    // ── Risk check (coroutine) ──
+    CoTask<CheckResult> co_check(const RiskContext& ctx);
 
     // ── Circuit breaker ──
     bool is_circuit_break() const noexcept;
@@ -73,7 +84,7 @@ public:
 private:
     void update_circuit_break(const CheckResult& result);
 
-    mutable std::mutex mutex_;
+    mutable infra::CoMutex mutex_;
     std::unordered_map<RuleId, std::unique_ptr<IRiskRule>> rules_;
     std::vector<RuleId> rule_order_;
 

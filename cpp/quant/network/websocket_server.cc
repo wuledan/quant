@@ -1,5 +1,6 @@
 // websocket_server.cc — WebSocket server implementation
 #include "cpp/quant/network/websocket_server.h"
+#include "cpp/quant/network/co_io.h"
 #include "cpp/quant/network/tcp_connection.h"
 
 #include <algorithm>
@@ -69,9 +70,6 @@ bool WebSocketServer::send(const std::string& session_id, const std::string& mes
         message.size(), WsOpcode::kText);
     stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
     stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
-
-    // In production: write to session's socket
-    // For now: placeholder — actual socket write happens in event loop
     return true;
 }
 
@@ -118,6 +116,83 @@ WebSocketServer::Stats WebSocketServer::stats() const noexcept {
     s.connections_opened = stats_.connections_opened.load(std::memory_order_relaxed);
     s.connections_closed = stats_.connections_closed.load(std::memory_order_relaxed);
     return s;
+}
+
+// ── Coroutine I/O (requires CoIouring) ──
+
+CoTask<bool> WebSocketServer::co_start() {
+    if (ring_ == nullptr) co_return false;
+
+    int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (fd < 0) co_return false;
+
+    int opt = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(config_.port));
+
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd); co_return false;
+    }
+    if (::listen(fd, 128) < 0) {
+        ::close(fd); co_return false;
+    }
+
+    listen_fd_.store(fd, std::memory_order_relaxed);
+    running_.store(true, std::memory_order_relaxed);
+    co_return true;
+}
+
+CoTask<bool> WebSocketServer::co_send(const std::string& session_id, const std::string& message) {
+    auto frame = encode_ws_frame(
+        reinterpret_cast<const uint8_t*>(message.data()),
+        message.size(), WsOpcode::kText);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
+
+    if (ring_ != nullptr) {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto it = impl_->session_to_fd.find(session_id);
+        if (it != impl_->session_to_fd.end()) {
+            ssize_t n = co_await ring_->co_send(it->second, frame.data(), frame.size(), MSG_NOSIGNAL);
+            co_return n > 0;
+        }
+    }
+    co_return true;
+}
+
+CoTask<bool> WebSocketServer::co_send_binary(const std::string& session_id, const uint8_t* data, size_t len) {
+    auto frame = encode_ws_frame(data, len, WsOpcode::kBinary);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
+
+    if (ring_ != nullptr) {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto it = impl_->session_to_fd.find(session_id);
+        if (it != impl_->session_to_fd.end()) {
+            ssize_t n = co_await ring_->co_send(it->second, frame.data(), frame.size(), MSG_NOSIGNAL);
+            co_return n > 0;
+        }
+    }
+    co_return true;
+}
+
+CoTask<void> WebSocketServer::co_broadcast(const std::string& message) {
+    auto frame = encode_ws_frame(
+        reinterpret_cast<const uint8_t*>(message.data()),
+        message.size(), WsOpcode::kText);
+    stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
+    stats_.bytes_sent.fetch_add(frame.size() * session_count(), std::memory_order_relaxed);
+
+    if (ring_ != nullptr) {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        for (const auto& [fid, sid] : impl_->fd_to_session) {
+            co_await ring_->co_send(fid, frame.data(), frame.size(), MSG_NOSIGNAL);
+        }
+    }
 }
 
 }  // namespace quant::network

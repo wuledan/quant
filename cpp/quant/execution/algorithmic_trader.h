@@ -11,8 +11,11 @@
 
 #include "cpp/quant/execution/order.h"
 #include "cpp/quant/execution/order_manager.h"
+#include "cpp/quant/infra/coroutine.h"
 
 namespace quant::execution {
+
+using infra::CoTask;
 
 // ── Algo order config ──
 struct AlgoOrderConfig {
@@ -42,8 +45,12 @@ public:
     // ── Called periodically (by timer or tick) to generate slices ──
     virtual void on_tick(int64_t now_ns) = 0;
 
+    // ── Coroutine variants ──
+    virtual CoTask<void> co_on_tick(int64_t now_ns) = 0;
+
     // ── Called on fill report ──
     virtual void on_fill(const FillReport& report);
+    virtual CoTask<void> co_on_fill(const FillReport& report);
 
     // ── Status ──
     bool is_running() const noexcept { return running_; }
@@ -56,10 +63,12 @@ public:
         int64_t total_value     = 0;
     };
     Stats stats() const noexcept;
+    CoTask<Stats> co_stats() const noexcept;
 
 protected:
     // ── Create and submit a child slice order ──
     virtual OrderId submit_slice(int64_t quantity);
+    virtual CoTask<OrderId> co_submit_slice(int64_t quantity);
 
     // ── Calculate quantity for next slice ──
     virtual int64_t calc_slice_qty(int64_t remaining, int64_t now_ns) = 0;
@@ -67,7 +76,7 @@ protected:
     OrderManager&       order_manager_;
     AlgoOrderConfig     config_;
     std::atomic<bool>   running_{false};
-    mutable std::mutex  mutex_;
+    mutable infra::CoMutex mutex_;
 
     OrderId             parent_order_id_ = 0;
     int64_t             total_filled_    = 0;
@@ -84,6 +93,7 @@ public:
         : AlgorithmicTrader(om, config), slice_interval_(slice_interval) {}
 
     void on_tick(int64_t now_ns) override;
+    CoTask<void> co_on_tick(int64_t now_ns) override;
 
 protected:
     int64_t calc_slice_qty(int64_t remaining, int64_t now_ns) override;
@@ -103,6 +113,7 @@ public:
     void set_volume_profile(const std::vector<double>& weights);
 
     void on_tick(int64_t now_ns) override;
+    CoTask<void> co_on_tick(int64_t now_ns) override;
 
 protected:
     int64_t calc_slice_qty(int64_t remaining, int64_t now_ns) override;
@@ -121,6 +132,7 @@ public:
         : AlgorithmicTrader(om, config), participation_rate_(participation_rate) {}
 
     void on_tick(int64_t now_ns) override;
+    CoTask<void> co_on_tick(int64_t now_ns) override;
 
     void set_participation_rate(double rate) noexcept {
         participation_rate_ = rate;

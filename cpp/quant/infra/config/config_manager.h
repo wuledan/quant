@@ -1,4 +1,4 @@
-// config_manager.h — Layered configuration manager with hot reload
+// config_manager.h — Layered configuration manager with hot reload (coroutine-aware)
 #pragma once
 
 #include <any>
@@ -15,8 +15,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cpp/quant/infra/config/config_source.h"
-#include "cpp/quant/infra/config/config_validator.h"
+#include <folly/coro/Mutex.h>
+
+#include "config_source.h"
+#include "config_validator.h"
+#include "coroutine.h"
 
 namespace quant::infra {
 
@@ -52,10 +55,10 @@ public:
     bool load_module(std::string_view module, std::unique_ptr<ConfigSource> source);
     bool load_strategy(std::string_view strategy_id, std::unique_ptr<ConfigSource> source);
 
-    // ── Read ──
+    // ── Read (thread-safe, sync) ──
     template<typename T>
     std::optional<T> get(std::string_view key) const {
-        std::shared_lock lock(mutex_);
+        std::shared_lock lock(rw_mutex_);
         // Strategy > Module > Global
         std::string key_str(key);
         auto it = strategy_config_.find(key_str);
@@ -79,16 +82,21 @@ public:
         return val.value_or(default_val);
     }
 
-    // ── Set (runtime update) ──
+    // ── Set (runtime update, sync) ──
     bool set(std::string_view key, ConfigValue value, ConfigLevel level);
 
     // ── Subscribe to changes ──
     uint64_t subscribe(std::string_view key_pattern, ConfigCallback callback);
     void unsubscribe(uint64_t id);
 
-    // ── Hot reload ──
+    // ── Hot reload (sync) ──
     void enable_hot_reload(std::chrono::seconds poll_interval = std::chrono::seconds(5));
     void disable_hot_reload();
+
+    // ── Coroutine async reload ──
+    // Reloads all config sources asynchronously using CoMutex.
+    // Returns true if any values changed.
+    CoTask<bool> co_reload();
 
     // ── Export all ──
     std::map<std::string, ConfigValue> export_all() const;
@@ -119,7 +127,9 @@ private:
         ConfigLevel level,
         std::unique_lock<std::shared_mutex>& lock);
 
-    mutable std::shared_mutex mutex_;
+    mutable std::shared_mutex rw_mutex_;
+    folly::coro::Mutex co_mutex_;
+
     std::map<std::string, ConfigValue> global_config_;
     std::map<std::string, ConfigValue> module_config_;
     std::map<std::string, ConfigValue> strategy_config_;

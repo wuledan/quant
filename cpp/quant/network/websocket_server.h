@@ -9,7 +9,11 @@
 #include <string>
 #include <vector>
 
+#include "cpp/quant/infra/coroutine.h"
+
 namespace quant::network {
+
+using infra::CoTask;
 
 // ── WebSocket opcodes ──
 enum class WsOpcode : uint8_t {
@@ -115,7 +119,8 @@ inline std::string ws_accept_key(const std::string& key) {
     return key + "-accepted";
 }
 
-// ── WebSocket config ──
+// ── CoIouring integration ──
+class CoIouring;
 struct WsServerConfig {
     int          port = 8080;
     std::string  host = "0.0.0.0";
@@ -142,6 +147,18 @@ public:
     bool send(const std::string& session_id, const std::string& message);
     bool send_binary(const std::string& session_id, const uint8_t* data, size_t len);
     void broadcast(const std::string& message);
+
+    // ── CoIouring integration ──
+    void set_io_uring(class CoIouring* ring) noexcept { ring_ = ring; }
+
+    // ── Coroutine lifecycle ──
+    CoTask<bool> co_start();
+
+    // ── Coroutine send ──
+    CoTask<bool> co_send(const std::string& session_id, const std::string& message);
+    CoTask<bool> co_send_binary(const std::string& session_id, const uint8_t* data, size_t len);
+    CoTask<void> co_broadcast(const std::string& message);
+
 
     // ── Session management ──
     bool close_session(const std::string& session_id);
@@ -179,6 +196,7 @@ private:
         std::atomic<uint64_t> connections_closed{0};
     };
     mutable AtomicStats stats_;
+    CoIouring* ring_{nullptr};
 };
 
 }  // namespace quant::network

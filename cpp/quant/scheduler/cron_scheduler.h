@@ -1,4 +1,4 @@
-// cron_scheduler.h — Cron-based time-triggered scheduling
+// cron_scheduler.h — Cron-based time-triggered scheduling (coroutine-aware)
 #pragma once
 
 #include <atomic>
@@ -12,6 +12,15 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include <folly/CancellationToken.h>
+
+#include "coroutine.h"
+
+namespace quant::infra {
+class TimerScheduler;
+class WorkStealingExecutor;
+}
 
 namespace quant::scheduler {
 
@@ -38,13 +47,26 @@ public:
     CronScheduler(const CronScheduler&) = delete;
     CronScheduler& operator=(const CronScheduler&) = delete;
 
-    uint64_t add_job(std::string name, std::string cron_expression, std::function<void()> action);
+    // ── Job management (thread-safe) ──
+    uint64_t add_job(std::string name, std::string cron_expression,
+                     std::function<void()> action);
     bool remove_job(uint64_t job_id);
     void enable_job(uint64_t job_id, bool enabled);
+
+    // ── Synchronous lifecycle (legacy, uses std::thread) ──
     void start();
     void stop();
 
-    static int64_t next_match(const std::string& cron_expr, int64_t after_timestamp);
+    // ── Coroutine-based lifecycle ──
+    // Runs the tick loop on the given executor using TimerScheduler::co_sleep.
+    quant::infra::CoTask<void>
+    start_async(quant::infra::TimerScheduler& timer,
+                quant::infra::WorkStealingExecutor& executor,
+                folly::CancellationToken cancel = {});
+
+    // ── Cron expression parsing (static, no state access) ──
+    static int64_t next_match(const std::string& cron_expr,
+                              int64_t after_timestamp);
     static bool matches(const std::string& cron_expr, int64_t timestamp);
 
     bool is_running() const noexcept { return running_.load(); }
@@ -52,6 +74,7 @@ public:
 
 private:
     void tick();
+    quant::infra::CoTask<void> tick_async();
 
     std::atomic<bool> running_{false};
     std::unique_ptr<std::thread> scheduler_thread_;

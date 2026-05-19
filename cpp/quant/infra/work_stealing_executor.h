@@ -112,6 +112,11 @@ private:
 
     struct WorkerState {
         std::unique_ptr<ChaseLevDeque<WorkItem>> local_deque;
+        // Concurrent MPMC queue for thread-affine external submissions.
+        // Chase-Lev supports push/pop only from the owner thread (steal from
+        // any) — add_to_worker / routing from non-owner threads MUST use this.
+        using AffineQueue = folly::UMPMCQueue<WorkItem, false, 6>;
+        std::unique_ptr<AffineQueue> affine_queue;
         std::thread thread;
         size_t worker_id;
         std::atomic<bool> parked{false};
@@ -158,10 +163,14 @@ private:
 
 // ── co_submit implementation (template, must be in header) ──
 //
-// Pattern: submit callable to executor, then await completion.
-// Uses folly::coro::Baton for signaling but routes the resume through
-// the WorkStealingExecutor to avoid inline resume on a pool worker,
-// which would break blockingWait's fiber scheduling.
+// Submits a callable to the executor and returns a Task that completes
+// when the callable finishes. Uses AffinityBaton for coroutine signaling,
+// which routes the resume via add_to_worker() back to the caller's worker
+// thread — preserving thread affinity (design constraint 6).
+//
+// IMPORTANT: co_submit is designed to be called from within a coroutine
+// context (co_await ex.co_submit(...)). Do NOT use folly::coro::blockingWait
+// to bridge from synchronous code — use submit() for that instead.
 
 template <typename F>
 folly::coro::Task<std::invoke_result_t<F>>
@@ -169,15 +178,13 @@ WorkStealingExecutor::co_submit(F&& func) {
     using R = std::invoke_result_t<F>;
 
     struct SharedState {
-        folly::coro::Baton baton;
+        AffinityBaton baton;
         std::exception_ptr ex;
         std::conditional_t<std::is_void_v<R>, std::nullptr_t, R> result{};
-        WorkStealingExecutor* executor{nullptr};
     };
     auto state = std::make_shared<SharedState>();
-    state->executor = this;
 
-    this->add([func = std::forward<F>(func), state]() mutable {
+    this->add([func = std::forward<F>(func), state, this]() mutable {
         try {
             if constexpr (std::is_void_v<R>) {
                 func();
@@ -187,13 +194,10 @@ WorkStealingExecutor::co_submit(F&& func) {
         } catch (...) {
             state->ex = std::current_exception();
         }
-        // Route resume through the executor rather than inline resume.
-        // This ensures the coroutine resumes on a pool worker thread
-        // where folly's Task promise can safely manage its state,
-        // rather than resuming inline on whatever thread called post().
-        state->executor->add([state]() {
-            state->baton.post();
-        });
+        // AffinityBaton::post(executor) drains the waiter chain and routes
+        // each waiter's handle via add_to_worker(worker_id, handle),
+        // which restores the coroutine on its original worker thread.
+        state->baton.post(*this);
     });
 
     co_await state->baton;
@@ -208,5 +212,6 @@ WorkStealingExecutor::co_submit(F&& func) {
         co_return std::move(state->result);
     }
 }
+
 
 }  // namespace quant::infra

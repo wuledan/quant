@@ -9,18 +9,20 @@ namespace quant::execution {
 OrderManager::OrderManager() = default;
 OrderManager::~OrderManager() = default;
 
-Result<OrderId> OrderManager::create_order(const OrderRequest& req) {
+// ── Coroutine methods ──
+
+CoTask<Result<OrderId>> OrderManager::co_create_order(const OrderRequest& req) {
     if (req.quantity <= 0) {
-        return Result<OrderId>(infra::ErrorCode::InvalidArgument, "Quantity must be positive");
+        co_return Result<OrderId>(infra::ErrorCode::InvalidArgument, "Quantity must be positive");
     }
     if (req.symbol.empty()) {
-        return Result<OrderId>(infra::ErrorCode::InvalidArgument, "Symbol must not be empty");
+        co_return Result<OrderId>(infra::ErrorCode::InvalidArgument, "Symbol must not be empty");
     }
 
     auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = co_await mutex_.co_scoped_lock();
 
     OrderId id = next_order_id();
     Order order;
@@ -41,21 +43,21 @@ Result<OrderId> OrderManager::create_order(const OrderRequest& req) {
     orders_.emplace(id, std::move(order));
     symbol_index_[req.symbol].push_back(id);
 
-    return Result<OrderId>(id);
+    co_return Result<OrderId>(id);
 }
 
-Result<void> OrderManager::cancel_order(OrderId order_id) {
-    return apply_transition(order_id, OrderStatus::kPendingCancel);
+CoTask<Result<void>> OrderManager::co_cancel_order(OrderId order_id) {
+    co_return co_await co_apply_transition(order_id, OrderStatus::kPendingCancel);
 }
 
-Result<void> OrderManager::modify_order(const OrderModifyRequest& req) {
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<Result<void>> OrderManager::co_modify_order(const OrderModifyRequest& req) {
+    auto lock = co_await mutex_.co_scoped_lock();
     auto it = orders_.find(req.order_id);
     if (it == orders_.end()) {
-        return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
+        co_return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
     }
     if (!OrderStateMachine::can_modify(it->second.status)) {
-        return Result<void>(infra::ErrorCode::InvalidArgument,
+        co_return Result<void>(infra::ErrorCode::InvalidArgument,
             "Order cannot be modified in current state");
     }
     auto& order = it->second;
@@ -65,40 +67,43 @@ Result<void> OrderManager::modify_order(const OrderModifyRequest& req) {
     if (!req.ext_data.empty()) order.ext_data = req.ext_data;
     order.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    return Result<void>();
+    co_return Result<void>();
 }
 
-Result<void> OrderManager::on_order_accepted(OrderId order_id, std::string broker_order_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<Result<void>> OrderManager::co_on_order_accepted(
+    OrderId order_id, std::string broker_order_id) {
+    auto lock = co_await mutex_.co_scoped_lock();
     auto it = orders_.find(order_id);
     if (it == orders_.end()) {
-        return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
+        co_return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
     }
     it->second.broker_order_id = std::move(broker_order_id);
     it->second.status = OrderStatus::kNew;
     it->second.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    return Result<void>();
+    co_return Result<void>();
 }
 
-Result<void> OrderManager::on_order_rejected(OrderId order_id, std::string reason) {
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<Result<void>> OrderManager::co_on_order_rejected(
+    OrderId order_id, std::string reason) {
+    auto lock = co_await mutex_.co_scoped_lock();
     auto it = orders_.find(order_id);
     if (it == orders_.end()) {
-        return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
+        co_return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
     }
     it->second.reject_reason = std::move(reason);
     it->second.status = OrderStatus::kRejected;
     it->second.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    return Result<void>();
+    co_return Result<void>();
 }
 
-Result<void> OrderManager::on_order_fill(OrderId order_id, int64_t fill_qty, int64_t fill_price) {
-    std::lock_guard<std::mutex> lock(mutex_);
+CoTask<Result<void>> OrderManager::co_on_order_fill(
+    OrderId order_id, int64_t fill_qty, int64_t fill_price) {
+    auto lock = co_await mutex_.co_scoped_lock();
     auto it = orders_.find(order_id);
     if (it == orders_.end()) {
-        return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
+        co_return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
     }
     auto& order = it->second;
     order.filled_quantity += fill_qty;
@@ -109,29 +114,84 @@ Result<void> OrderManager::on_order_fill(OrderId order_id, int64_t fill_qty, int
         ? OrderStatus::kFilled : OrderStatus::kPartialFilled;
     order.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    return Result<void>();
+    co_return Result<void>();
+}
+
+CoTask<Result<void>> OrderManager::co_on_order_cancelled(OrderId order_id) {
+    co_return co_await co_apply_transition(order_id, OrderStatus::kCancelled);
+}
+
+CoTask<Result<void>> OrderManager::co_on_order_expired(OrderId order_id) {
+    co_return co_await co_apply_transition(order_id, OrderStatus::kExpired);
+}
+
+CoTask<Result<void>> OrderManager::co_on_order_suspended(OrderId order_id) {
+    co_return co_await co_apply_transition(order_id, OrderStatus::kSuspended);
+}
+
+CoTask<Result<void>> OrderManager::co_apply_transition(
+    OrderId order_id, OrderStatus new_status) {
+    auto lock = co_await mutex_.co_scoped_lock();
+    auto it = orders_.find(order_id);
+    if (it == orders_.end()) {
+        co_return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
+    }
+    auto result = OrderStateMachine::apply_transition(it->second.status, new_status);
+    if (!result.ok()) co_return result;
+    it->second.status = new_status;
+    it->second.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    co_return Result<void>();
+}
+
+// ── Sync wrappers ──
+
+Result<OrderId> OrderManager::create_order(const OrderRequest& req) {
+    return folly::coro::blockingWait(co_create_order(req));
+}
+
+Result<void> OrderManager::cancel_order(OrderId order_id) {
+    return folly::coro::blockingWait(co_cancel_order(order_id));
+}
+
+Result<void> OrderManager::modify_order(const OrderModifyRequest& req) {
+    return folly::coro::blockingWait(co_modify_order(req));
+}
+
+Result<void> OrderManager::on_order_accepted(OrderId order_id, std::string broker_order_id) {
+    return folly::coro::blockingWait(co_on_order_accepted(order_id, std::move(broker_order_id)));
+}
+
+Result<void> OrderManager::on_order_rejected(OrderId order_id, std::string reason) {
+    return folly::coro::blockingWait(co_on_order_rejected(order_id, std::move(reason)));
+}
+
+Result<void> OrderManager::on_order_fill(OrderId order_id, int64_t fill_qty, int64_t fill_price) {
+    return folly::coro::blockingWait(co_on_order_fill(order_id, fill_qty, fill_price));
 }
 
 Result<void> OrderManager::on_order_cancelled(OrderId order_id) {
-    return apply_transition(order_id, OrderStatus::kCancelled);
+    return folly::coro::blockingWait(co_on_order_cancelled(order_id));
 }
 
 Result<void> OrderManager::on_order_expired(OrderId order_id) {
-    return apply_transition(order_id, OrderStatus::kExpired);
+    return folly::coro::blockingWait(co_on_order_expired(order_id));
 }
 
 Result<void> OrderManager::on_order_suspended(OrderId order_id) {
-    return apply_transition(order_id, OrderStatus::kSuspended);
+    return folly::coro::blockingWait(co_on_order_suspended(order_id));
 }
 
+// ── Query methods (thread-safe via mutex) ──
+
 const Order* OrderManager::find_order(OrderId order_id) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     auto it = orders_.find(order_id);
     return it != orders_.end() ? &it->second : nullptr;
 }
 
 std::vector<const Order*> OrderManager::find_orders_by_symbol(const std::string& symbol) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     std::vector<const Order*> result;
     auto it = symbol_index_.find(symbol);
     if (it != symbol_index_.end()) {
@@ -144,7 +204,7 @@ std::vector<const Order*> OrderManager::find_orders_by_symbol(const std::string&
 }
 
 std::vector<const Order*> OrderManager::find_orders_by_status(OrderStatus status) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     std::vector<const Order*> result;
     for (const auto& [id, order] : orders_) {
         if (order.status == status) result.push_back(&order);
@@ -153,7 +213,7 @@ std::vector<const Order*> OrderManager::find_orders_by_status(OrderStatus status
 }
 
 std::vector<const Order*> OrderManager::all_orders() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     std::vector<const Order*> result;
     result.reserve(orders_.size());
     for (const auto& [id, order] : orders_) {
@@ -163,7 +223,7 @@ std::vector<const Order*> OrderManager::all_orders() const {
 }
 
 size_t OrderManager::active_order_count() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = folly::coro::blockingWait(mutex_.co_scoped_lock());
     size_t count = 0;
     for (const auto& [id, order] : orders_) {
         if (OrderStateMachine::is_active(order.status) ||
@@ -176,17 +236,7 @@ size_t OrderManager::active_order_count() const noexcept {
 }
 
 Result<void> OrderManager::apply_transition(OrderId order_id, OrderStatus new_status) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = orders_.find(order_id);
-    if (it == orders_.end()) {
-        return Result<void>(infra::ErrorCode::DataNotFound, "Order not found");
-    }
-    auto result = OrderStateMachine::apply_transition(it->second.status, new_status);
-    if (!result.ok()) return result;
-    it->second.status = new_status;
-    it->second.updated_at_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    return Result<void>();
+    return folly::coro::blockingWait(co_apply_transition(order_id, new_status));
 }
 
 }  // namespace quant::execution

@@ -56,6 +56,8 @@ WorkStealingExecutor::WorkStealingExecutor(
         auto ws = std::make_unique<WorkerState>();
         ws->local_deque =
             std::make_unique<ChaseLevDeque<WorkItem>>(kLocalDequeCapacity);
+        ws->affine_queue =
+            std::make_unique<WorkerState::AffineQueue>();
         ws->worker_id = i;
         workers_.push_back(std::move(ws));
     }
@@ -164,7 +166,7 @@ void WorkStealingExecutor::add_to_worker(size_t worker_id, folly::Func func) {
     item.target_worker_id = worker_id;
     item.is_coroutine_resume = true;
 
-    workers_[worker_id]->local_deque->push(std::move(item));
+    workers_[worker_id]->affine_queue->enqueue(std::move(item));
     wake_worker(worker_id);
 }
 
@@ -180,25 +182,39 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
         WorkItem item;
         bool found = false;
 
-        // ── Step 1: pop own local deque (LIFO, O(1), lock-free) ──
-        auto popped = me.local_deque->pop();
-        if (popped) {
-            item = std::move(*popped);
+        // ── Step 1: affine queue (MPMC, concurrent-safe) ──
+        // Thread-affine submissions (coroutine resumes) have highest priority.
+        WorkItem affine_item;
+        if (me.affine_queue->try_dequeue(affine_item)) {
+            item = std::move(affine_item);
             found = true;
-            me.local_pops.fetch_add(1, std::memory_order_relaxed);
         }
 
-        // ── Step 2: read from global queue ──
+        // ── Step 2: pop own Chase-Lev deque (LIFO, O(1), lock-free) ──
+        // Only the owner thread calls push/pop — never a thief.
+        if (!found) {
+            auto popped = me.local_deque->pop();
+            if (popped) {
+                item = std::move(*popped);
+                found = true;
+                me.local_pops.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // ── Step 3: read from global queue ──
         if (!found) {
             WorkItem global_item;
             if (global_queue_.try_dequeue(global_item)) {
-                // If this task has affinity to a different worker, redirect it
+                // If this task has affinity to a different worker, redirect
+                // via the target's affine queue (NOT local_deque::push —
+                // we are not the owner of that Chase-Lev deque).
                 if (global_item.target_worker_id != kExternalThread &&
                     global_item.target_worker_id != my_id) {
-                    workers_[global_item.target_worker_id]->local_deque->push(
-                        std::move(global_item));
+                    workers_[global_item.target_worker_id]->affine_queue->
+                        enqueue(std::move(global_item));
+                    // Wake the target worker so it picks up the affine task
+                    wake_worker(global_item.target_worker_id);
                     found = false;
-                    // Continue to steal loop (don't execute in-flight)
                 } else {
                     item = std::move(global_item);
                     found = true;
@@ -206,7 +222,7 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
             }
         }
 
-        // ── Step 3: steal from random victim (FIFO, lock-free) ──
+        // ── Step 4: steal from random victim (FIFO, lock-free) ──
         if (!found) {
             for (size_t attempt = 0; attempt < kStealAttempts; ++attempt) {
                 size_t victim = fast_rand() % num_workers_;
@@ -216,12 +232,12 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
                 if (stolen) {
                     workers_[victim]->steals_from_me.fetch_add(
                         1, std::memory_order_relaxed);
-                    // If this task has thread affinity to a different
-                    // worker, redirect it instead of executing locally.
+                    // Thread affinity → redirect via target's affine queue
                     if (stolen->target_worker_id != kExternalThread &&
                         stolen->target_worker_id != my_id) {
-                        workers_[stolen->target_worker_id]->local_deque->
-                            push(std::move(*stolen));
+                        workers_[stolen->target_worker_id]->affine_queue->
+                            enqueue(std::move(*stolen));
+                        wake_worker(stolen->target_worker_id);
                         found = false;
                         break;
                     }
@@ -273,12 +289,12 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
                     std::unique_lock lock(me.park_mutex);
                     me.parked.store(true, std::memory_order_release);
 
-                    // Re-check global queue while holding park_mutex.
-                    // add() takes park_mutex in wake_one_worker(),
-                    // so this synchronizes with enqueue.
+                    // Re-check affine and global queues while holding
+                    // park_mutex. wake_worker()/wake_one_worker() also take
+                    // park_mutex, so this synchronizes with enqueue and
+                    // prevents lost-wakeup.
                     WorkItem late_item;
-                    if (global_queue_.try_dequeue(late_item)) {
-                        // Found work — don't park, execute immediately
+                    if (me.affine_queue->try_dequeue(late_item)) {
                         me.parked.store(false, std::memory_order_release);
                         lock.unlock();
                         me.spin_count = 0;
@@ -288,8 +304,25 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
                         auto task_end = std::chrono::steady_clock::now();
                         auto busy_ns =
                             std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                task_end - task_start)
-                                .count();
+                                task_end - task_start).count();
+                        me.busy_cycles_ns.fetch_add(
+                            static_cast<uint64_t>(busy_ns),
+                            std::memory_order_relaxed);
+                        me.tasks_completed.fetch_add(
+                            1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    if (global_queue_.try_dequeue(late_item)) {
+                        me.parked.store(false, std::memory_order_release);
+                        lock.unlock();
+                        me.spin_count = 0;
+                        me.yield_count = 0;
+                        auto task_start = std::chrono::steady_clock::now();
+                        late_item.execute();
+                        auto task_end = std::chrono::steady_clock::now();
+                        auto busy_ns =
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                task_end - task_start).count();
                         me.busy_cycles_ns.fetch_add(
                             static_cast<uint64_t>(busy_ns),
                             std::memory_order_relaxed);

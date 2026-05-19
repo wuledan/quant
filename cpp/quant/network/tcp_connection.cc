@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <system_error>
 
+#include "cpp/quant/network/co_io.h"
+
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
@@ -169,6 +171,80 @@ size_t TcpConnection::recv(char* buf, size_t len) {
         }
     }
     return n > 0 ? static_cast<size_t>(n) : 0;
+}
+
+// ── Coroutine I/O (requires CoIouring) ──
+
+CoTask<bool> TcpConnection::co_connect() {
+    if (ring_ == nullptr) co_return false;
+    if (is_connected()) co_return true;
+
+    set_state(TcpState::kConnecting);
+    if (!create_socket()) {
+        set_state(TcpState::kError);
+        co_return false;
+    }
+
+    struct hostent* server = ::gethostbyname(config_.host.c_str());
+    if (!server) {
+        set_state(TcpState::kError);
+        close_socket();
+        co_return false;
+    }
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    std::memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+    addr.sin_port = htons(static_cast<uint16_t>(config_.port));
+
+    bool ok = co_await ring_->co_connect(fd_,
+        reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    if (!ok) {
+        set_state(TcpState::kError);
+        close_socket();
+        co_return false;
+    }
+
+    set_state(TcpState::kConnected);
+    reconnect_attempts_ = 0;
+    last_activity_ = infra::Timestamp::now();
+    if (callbacks_.on_connected) callbacks_.on_connected();
+    co_return true;
+}
+
+CoTask<size_t> TcpConnection::co_send(const char* data, size_t len) {
+    if (!is_connected() || ring_ == nullptr) co_return 0;
+    if (write_buf_.writable() < len) {
+        write_buf_.grow(write_buf_.capacity() + len);
+    }
+    std::memcpy(write_buf_.write_data(), data, len);
+    write_buf_.produced(len);
+
+    ssize_t n = co_await ring_->co_send(fd_, write_buf_.read_data(),
+                                          write_buf_.readable(), MSG_NOSIGNAL);
+    if (n > 0) {
+        write_buf_.consume(static_cast<size_t>(n));
+        last_activity_ = infra::Timestamp::now();
+    }
+    co_return n > 0 ? static_cast<size_t>(n) : 0;
+}
+
+CoTask<size_t> TcpConnection::co_send(const std::string& data) {
+    co_return co_await co_send(data.c_str(), data.size());
+}
+
+CoTask<size_t> TcpConnection::co_recv(char* buf, size_t len) {
+    if (!is_connected() || ring_ == nullptr) co_return 0;
+    auto n = co_await ring_->co_recv(fd_, buf, len, MSG_NOSIGNAL);
+    if (n > 0) {
+        last_activity_ = infra::Timestamp::now();
+    } else if (n == 0) {
+        set_state(TcpState::kDisconnected);
+        if (callbacks_.on_disconnected) {
+            callbacks_.on_disconnected("peer closed connection");
+        }
+    }
+    co_return n > 0 ? static_cast<size_t>(n) : 0;
 }
 
 }  // namespace quant::network

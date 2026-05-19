@@ -1,8 +1,11 @@
-// cron_scheduler.cc — CronScheduler implementation
-#include "cpp/quant/scheduler/cron_scheduler.h"
+// cron_scheduler.cc — CronScheduler implementation (coroutine-aware)
+#include "cron_scheduler.h"
 
 #include <ctime>
 #include <sstream>
+
+#include "timer_scheduler.h"
+#include "work_stealing_executor.h"
 
 namespace quant::scheduler {
 
@@ -38,6 +41,8 @@ void CronScheduler::enable_job(uint64_t job_id, bool enabled) {
     if (it != jobs_.end()) it->second.enabled = enabled;
 }
 
+// ── Synchronous lifecycle ──
+
 void CronScheduler::start() {
     if (running_.exchange(true)) return;
     scheduler_thread_ = std::make_unique<std::thread>([this]() {
@@ -57,6 +62,8 @@ void CronScheduler::stop() {
     scheduler_thread_.reset();
 }
 
+// ── Sync tick ──
+
 void CronScheduler::tick() {
     auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -71,6 +78,27 @@ void CronScheduler::tick() {
             job.last_run = now;
             job.next_run = next_match(job.cron_expression, now);
         }
+    }
+}
+
+// ── Coroutine-based lifecycle ──
+
+quant::infra::CoTask<void>
+CronScheduler::start_async(
+    quant::infra::TimerScheduler& timer,
+    quant::infra::WorkStealingExecutor& executor,
+    folly::CancellationToken cancel) {
+    running_.store(true);
+
+    while (running_.load() && !cancel.isCancellationRequested()) {
+        // Sleep for the tick interval using the coroutine-friendly timer
+        co_await timer.co_sleep(
+            std::chrono::milliseconds(config_.tick_interval_ms));
+
+        if (!running_.load() || cancel.isCancellationRequested()) break;
+
+        // Run tick on the executor to avoid blocking the timer thread
+        co_await executor.co_submit([this]() { tick(); });
     }
 }
 

@@ -2,6 +2,7 @@
 #include "cpp/quant/infra/work_stealing_executor.h"
 
 #include <folly/coro/BlockingWait.h>
+#include <folly/coro/Collect.h>
 #include <folly/coro/Task.h>
 #include <gtest/gtest.h>
 
@@ -308,49 +309,88 @@ TEST(WorkStealingExecutorTest, NoThreadGrowth) {
     ex.stop();
 }
 
-// ── Coroutine submission ──
+// ── Coroutine submission (co_submit, tested within coroutine context) ──
 
-TEST(WorkStealingExecutorTest, CoSubmitBasic) {
+folly::coro::Task<void> co_submit_int_task(WorkStealingExecutor& ex) {
+    auto result = co_await ex.co_submit([]() { return 42; });
+    EXPECT_EQ(result, 42);
+    co_return;
+}
+
+folly::coro::Task<void> co_submit_void_task(WorkStealingExecutor& ex,
+                                              std::atomic<bool>& flag) {
+    co_await ex.co_submit([&]() { flag = true; });
+    EXPECT_TRUE(flag.load());
+    co_return;
+}
+
+folly::coro::Task<void> co_submit_exception_task(WorkStealingExecutor& ex) {
+    bool caught = false;
+    try {
+        co_await ex.co_submit([]() -> int {
+            throw std::runtime_error("test error");
+        });
+    } catch (const std::runtime_error& e) {
+        caught = true;
+        EXPECT_STREQ(e.what(), "test error");
+    }
+    EXPECT_TRUE(caught);
+    co_return;
+}
+
+TEST(WorkStealingExecutorTest, CoSubmitInt) {
     WorkStealingExecutor ex(2);
     ex.start();
-
-    auto task = ex.co_submit([]() { return 42; });
-    auto result = folly::coro::blockingWait(std::move(task));
-    EXPECT_EQ(result, 42);
-
+    folly::coro::blockingWait(
+        folly::coro::co_withExecutor(&ex, co_submit_int_task(ex)));
     ex.stop();
 }
 
 TEST(WorkStealingExecutorTest, CoSubmitVoid) {
     WorkStealingExecutor ex(2);
     ex.start();
-
     std::atomic<bool> executed{false};
-    auto task = ex.co_submit([&]() { executed = true; });
-    // Task<void> via blockingWait has a known Folly fiber-injection issue
-    // where Baton::post() resumes on the wrong thread context for the
-    // BlockingWaitExecutor. Use the result-type variant as a workaround
-    // (co_submit returning int works correctly via blockingWait).
-    // For void, verify the callable executed by wrapping in a result:
-    auto result_task = ex.co_submit([&]() -> int { executed = true; return 0; });
-    auto result = folly::coro::blockingWait(std::move(result_task));
-    EXPECT_EQ(result, 0);
-    EXPECT_TRUE(executed);
-
+    folly::coro::blockingWait(
+        folly::coro::co_withExecutor(&ex, co_submit_void_task(ex, executed)));
     ex.stop();
 }
 
 TEST(WorkStealingExecutorTest, CoSubmitException) {
     WorkStealingExecutor ex(2);
     ex.start();
+    folly::coro::blockingWait(
+        folly::coro::co_withExecutor(&ex, co_submit_exception_task(ex)));
+    ex.stop();
+}
 
-    auto task = ex.co_submit([]() -> int {
-        throw std::runtime_error("test error");
-    });
+// ── blockingWait bridge for non-coroutine callers ──
 
-    EXPECT_THROW(folly::coro::blockingWait(std::move(task)),
-                 std::runtime_error);
+TEST(WorkStealingExecutorTest, CoSubmitFromSync) {
+    WorkStealingExecutor ex(2);
+    ex.start();
+    auto result = folly::coro::blockingWait(ex.co_submit([]() { return 42; }));
+    EXPECT_EQ(result, 42);
+    ex.stop();
+}
 
+TEST(WorkStealingExecutorTest, CoSubmitVoidFromSync) {
+    WorkStealingExecutor ex(2);
+    ex.start();
+    std::atomic<bool> executed{false};
+    folly::coro::blockingWait(
+        ex.co_submit([&]() { executed = true; }));
+    EXPECT_TRUE(executed);
+    ex.stop();
+}
+
+TEST(WorkStealingExecutorTest, CoSubmitExceptionFromSync) {
+    WorkStealingExecutor ex(2);
+    ex.start();
+    EXPECT_THROW(
+        folly::coro::blockingWait(ex.co_submit([]() -> int {
+            throw std::runtime_error("submit error");
+        })),
+        std::runtime_error);
     ex.stop();
 }
 

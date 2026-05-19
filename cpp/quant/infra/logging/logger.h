@@ -1,4 +1,4 @@
-// logger.h — Structured asynchronous logger
+// logger.h — Structured asynchronous logger (coroutine-aware)
 // Supports TRACE/DEBUG/INFO/WARN/ERROR/FATAL levels,
 // structured LogBuilder API, async ring buffer flush, multi-sink.
 #pragma once
@@ -11,9 +11,14 @@
 #include <string_view>
 #include <vector>
 
-#include "cpp/quant/infra/logging/log_sink.h"
+#include <folly/CancellationToken.h>
+
+#include "log_sink.h"
+#include "coroutine.h"
 
 namespace quant::infra {
+
+class WorkStealingExecutor;
 
 // ── Log levels ──
 enum class LogLevel : uint8_t {
@@ -81,7 +86,7 @@ public:
 
     LogBuilder with_fields() { return LogBuilder(this); }
 
-    // ── Configuration ──
+    // ── Configsuration ──
     void set_level(LogLevel level) { min_level_.store(level, std::memory_order_relaxed); }
     LogLevel level() const noexcept {
         return min_level_.load(std::memory_order_relaxed);
@@ -92,6 +97,11 @@ public:
 
     // ── Flush ──
     void flush();
+
+    // ── Async flush via WorkStealingExecutor ──
+    // Replaces the background flush thread with a coroutine on the executor.
+    CoTask<void> start_async_flush(WorkStealingExecutor& executor,
+                                    folly::CancellationToken cancel = {});
 
     // ── Metrics ──
     struct LoggerStats {

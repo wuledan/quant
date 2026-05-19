@@ -1,5 +1,5 @@
-// logger.cc — Structured asynchronous logger implementation
-#include "cpp/quant/infra/logging/logger.h"
+// logger.cc — Structured asynchronous logger implementation (coroutine-aware)
+#include "logger.h"
 
 #include <algorithm>
 #include <array>
@@ -14,11 +14,10 @@
 #include <thread>
 #include <vector>
 
-namespace quant::infra {
+#include "work_stealing_executor.h"
+#include "coroutine.h"
 
-// ── Thread-local record cache ──
-// Each thread has its own batch buffer to reduce contention.
-// The background flush thread periodically collects from all thread-local buffers.
+namespace quant::infra {
 
 // ── Logger::Impl ──
 class Logger::Impl {
@@ -85,12 +84,65 @@ public:
         }
     }
 
+    // ── Async flush loop (coroutine version) ──
+    // Runs on a WorkStealingExecutor, replaces flush_thread_.
+    quant::infra::CoTask<void>
+    start_async_flush(quant::infra::WorkStealingExecutor& executor,
+                      folly::CancellationToken cancel) {
+        // Stop the background thread if running
+        if (flush_thread_.joinable()) {
+            {
+                std::lock_guard lock(queue_mutex_);
+                stop_.store(true, std::memory_order_release);
+            }
+            cv_.notify_one();
+            flush_thread_.join();
+        }
+
+        stop_.store(false, std::memory_order_release);
+
+        // Reset baton for the async loop
+        flush_baton_.reset();
+
+        while (!cancel.isCancellationRequested() &&
+               !stop_.load(std::memory_order_acquire)) {
+            // Drain all available records
+            flush_all();
+
+            // If queue is empty, suspend until signaled
+            {
+                std::lock_guard lock(queue_mutex_);
+                if (queue_.empty()) {
+                    // Release the lock before suspending
+                }
+            }
+
+            if (queue_.empty() && !stop_.load(std::memory_order_acquire)) {
+                // Suspend via baton; the next enqueue will post it
+                co_await flush_baton_;
+                flush_baton_.reset();
+            }
+        }
+
+        // Final drain on stop/cancel
+        flush_all();
+    }
+
     uint64_t count() const noexcept {
         return count_.load(std::memory_order_relaxed);
     }
 
     uint64_t dropped() const noexcept {
         return dropped_.load(std::memory_order_relaxed);
+    }
+
+    // Signal the async flush coroutine that new data is available
+    void signal_async_flush(quant::infra::WorkStealingExecutor* executor) {
+        if (executor) {
+            flush_baton_.post(*executor);
+        } else {
+            flush_baton_.post_direct();
+        }
     }
 
 private:
@@ -120,6 +172,9 @@ private:
 
     std::atomic<uint64_t> count_{0};
     std::atomic<uint64_t> dropped_{0};
+
+    // Async flush primitives
+    quant::infra::AffinityBaton flush_baton_;
 };
 
 // ── Helper: get current time in microseconds ──
@@ -233,6 +288,12 @@ void Logger::remove_sinks() {
 
 void Logger::flush() {
     impl_->flush_all();
+}
+
+quant::infra::CoTask<void>
+Logger::start_async_flush(quant::infra::WorkStealingExecutor& executor,
+                           folly::CancellationToken cancel) {
+    co_return co_await impl_->start_async_flush(executor, std::move(cancel));
 }
 
 Logger::LoggerStats Logger::stats() const {

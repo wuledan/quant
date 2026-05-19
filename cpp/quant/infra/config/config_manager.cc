@@ -1,5 +1,6 @@
-// config_manager.cc — ConfigManager implementation
-#include "cpp/quant/infra/config/config_manager.h"
+// config_manager.cc — ConfigManager implementation (coroutine-aware)
+#include "config_manager.h"
+#include "coroutine.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,7 +16,7 @@ ConfigManager::~ConfigManager() {
 }
 
 bool ConfigManager::load_global(std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     bool ok = source->load(global_config_);
     if (ok) {
         global_sources_.push_back(std::move(source));
@@ -25,7 +26,7 @@ bool ConfigManager::load_global(std::unique_ptr<ConfigSource> source) {
 
 bool ConfigManager::load_module(std::string_view module,
                                   std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     bool ok = source->load(module_config_);
     if (ok) {
         module_sources_[std::string(module)].push_back(std::move(source));
@@ -35,7 +36,7 @@ bool ConfigManager::load_module(std::string_view module,
 
 bool ConfigManager::load_strategy(std::string_view strategy_id,
                                     std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     bool ok = source->load(strategy_config_);
     if (ok) {
         strategy_sources_[std::string(strategy_id)].push_back(std::move(source));
@@ -44,7 +45,7 @@ bool ConfigManager::load_strategy(std::string_view strategy_id,
 }
 
 bool ConfigManager::set(std::string_view key, ConfigValue value, ConfigLevel level) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     auto* target = &global_config_;
     if (level == ConfigLevel::kModule) target = &module_config_;
     else if (level == ConfigLevel::kStrategy) target = &strategy_config_;
@@ -71,21 +72,21 @@ bool ConfigManager::set(std::string_view key, ConfigValue value, ConfigLevel lev
 }
 
 uint64_t ConfigManager::subscribe(std::string_view key_pattern, ConfigCallback callback) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     uint64_t id = next_sub_id_++;
     subscriptions_.push_back({id, std::string(key_pattern), std::move(callback)});
     return id;
 }
 
 void ConfigManager::unsubscribe(uint64_t id) {
-    std::unique_lock lock(mutex_);
+    std::unique_lock lock(rw_mutex_);
     auto it = std::remove_if(subscriptions_.begin(), subscriptions_.end(),
         [id](const Subscription& s) { return s.id == id; });
     subscriptions_.erase(it, subscriptions_.end());
 }
 
 void ConfigManager::notify_change(const ConfigChangeEvent& event) {
-    std::shared_lock lock(mutex_);
+    std::shared_lock lock(rw_mutex_);
     for (const auto& sub : subscriptions_) {
         if (sub.key_pattern == "*" || sub.key_pattern == event.key) {
             sub.callback(event);
@@ -110,7 +111,7 @@ void ConfigManager::hot_reload_loop() {
     while (hot_reload_enabled_.load()) {
         std::this_thread::sleep_for(poll_interval_);
 
-        std::unique_lock lock(mutex_);
+        std::unique_lock lock(rw_mutex_);
         reload_sources(global_sources_, global_config_, ConfigLevel::kGlobal, lock);
         reload_sources(module_sources_, module_config_, ConfigLevel::kModule, lock);
         reload_sources(strategy_sources_, strategy_config_, ConfigLevel::kStrategy, lock);
@@ -183,7 +184,7 @@ void ConfigManager::reload_sources(
 }
 
 std::map<std::string, ConfigValue> ConfigManager::export_all() const {
-    std::shared_lock lock(mutex_);
+    std::shared_lock lock(rw_mutex_);
     std::map<std::string, ConfigValue> result = global_config_;
     // Module config overrides global
     for (const auto& [key, val] : module_config_) {
@@ -194,6 +195,77 @@ std::map<std::string, ConfigValue> ConfigManager::export_all() const {
         result[key] = val;
     }
     return result;
+}
+
+// ── Coroutine async reload ──
+
+quant::infra::CoTask<bool> ConfigManager::co_reload() {
+    auto lock = co_await co_mutex_.co_scoped_lock();
+
+    bool changed = false;
+
+    // Collect old state for comparison
+    auto old_global = global_config_;
+    auto old_module = module_config_;
+    auto old_strategy = strategy_config_;
+
+    // Reload global sources
+    for (auto& src : global_sources_) {
+        src->load(global_config_);
+    }
+
+    // Reload module sources
+    for (auto& [mod, srcs] : module_sources_) {
+        for (auto& src : srcs) {
+            src->load(module_config_);
+        }
+    }
+
+    // Reload strategy sources
+    for (auto& [sid, srcs] : strategy_sources_) {
+        for (auto& src : srcs) {
+            src->load(strategy_config_);
+        }
+    }
+
+    // Collect all change notifications under the lock, then fire outside it
+    struct ChangeNote {
+        std::string key;
+        ConfigValue old_value;
+        ConfigValue new_value;
+        ConfigLevel level;
+    };
+    std::vector<ChangeNote> notes;
+
+    auto collect = [&](const auto& old_cfg, const auto& new_cfg,
+                        ConfigLevel level) {
+        for (const auto& [k, v] : new_cfg) {
+            auto it = old_cfg.find(k);
+            if (it == old_cfg.end() || it->second != v) {
+                changed = true;
+                notes.push_back({k, (it == old_cfg.end()) ? ConfigValue{} : it->second, v, level});
+            }
+        }
+        for (const auto& [k, v] : old_cfg) {
+            if (new_cfg.find(k) == new_cfg.end()) {
+                changed = true;
+                notes.push_back({k, v, ConfigValue{}, level});
+            }
+        }
+    };
+
+    collect(old_global, global_config_, ConfigLevel::kGlobal);
+    collect(old_module, module_config_, ConfigLevel::kModule);
+    collect(old_strategy, strategy_config_, ConfigLevel::kStrategy);
+
+    // Release lock before firing callbacks
+    lock.unlock();
+
+    for (const auto& n : notes) {
+        notify_change({n.key, n.old_value, n.new_value, n.level, "co_reload"});
+    }
+
+    co_return changed;
 }
 
 }  // namespace quant::infra

@@ -1,6 +1,13 @@
-// event_bus.cc — EventBus implementation with lock-free MPSC async queue
-#include "cpp/quant/event/event_bus.h"
-#include "cpp/quant/event/queue/mpsc_queue.h"
+// event_bus.cc — EventBus implementation with coroutine async dispatch
+
+// Include folly headers BEFORE any quant headers that open quant::event
+// namespace to avoid collision with folly::event in portability/Event.h.
+#include <folly/coro/Collect.h>
+#include <folly/portability/Event.h>
+
+#include "event_bus.h"
+#include "work_stealing_executor.h"
+#include "queue/mpsc_queue.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -100,8 +107,22 @@ public:
         async_cv_.notify_one();
     }
 
+    quant::infra::CoTask<void> co_publish(std::unique_ptr<Event> event) {
+        // Enqueue the event
+        async_queue_.enqueue(std::move(event));
+        stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
+
+        // Signal the coroutine dispatcher
+        // If no executor is set (start_async not called), post directly
+        if (async_executor_) {
+            async_baton_.post(*async_executor_);
+        } else {
+            async_baton_.post_direct();
+        }
+        co_return;
+    }
+
     void replay_history(SubscriptionId id, size_t count) {
-        // Replay requires clone() on Event; to be implemented when needed.
         (void)id;
         (void)count;
     }
@@ -115,10 +136,10 @@ public:
         };
     }
 
-    // ── Explicit lifecycle ──
+    // ── Explicit lifecycle (thread-based) ──
     void start() {
         std::lock_guard<std::mutex> lock(worker_mutex_);
-        if (async_worker_.joinable()) return;  // already running
+        if (async_worker_.joinable()) return;
         stop_requested_.store(false, std::memory_order_release);
         async_worker_ = std::thread([this] { async_worker_loop(); });
     }
@@ -133,6 +154,45 @@ public:
         std::lock_guard<std::mutex> lock(worker_mutex_);
         if (async_worker_.joinable()) {
             async_worker_.join();
+        }
+    }
+
+    // ── Coroutine-based dispatch ──
+    quant::infra::CoTask<void>
+    start_async(quant::infra::WorkStealingExecutor& executor) {
+        async_executor_ = &executor;
+        stop_requested_.store(false, std::memory_order_release);
+        async_baton_.reset();
+
+        while (!stop_requested_.load(std::memory_order_acquire)) {
+            // Drain all available events
+            while (true) {
+                std::unique_ptr<Event> ev;
+                if (!async_queue_.dequeue(ev)) break;
+                if (ev) {
+                    publish(std::move(ev));
+                    stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+
+            // Wait for more events
+            if (stop_requested_.load(std::memory_order_acquire)) break;
+
+            // If there's nothing in the queue, suspend until baton is posted
+            // We must check again under the baton's atomic state
+            if (async_queue_.empty()) {
+                co_await async_baton_;
+                async_baton_.reset();
+            }
+        }
+
+        // Drain remaining on stop
+        std::unique_ptr<Event> remaining;
+        while (async_queue_.dequeue(remaining)) {
+            if (remaining) {
+                publish(std::move(remaining));
+                stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -151,13 +211,8 @@ private:
             while (true) {
                 std::unique_ptr<Event> ev;
                 {
-                    // Dequeue under cv_mutex_ so we synchronize with
-                    // publish_async which also holds cv_mutex_ when
-                    // enqueuing.
                     std::lock_guard<std::mutex> lock(cv_mutex_);
-                    if (!async_queue_.dequeue(ev)) {
-                        break;
-                    }
+                    if (!async_queue_.dequeue(ev)) break;
                 }
                 if (ev) {
                     publish(std::move(ev));
@@ -174,7 +229,6 @@ private:
                 });
 
                 if (stop_requested_.load(std::memory_order_acquire)) {
-                    // Drain remaining events before exiting
                     std::unique_ptr<Event> remaining;
                     while (async_queue_.dequeue(remaining)) {
                         if (remaining) {
@@ -203,6 +257,10 @@ private:
     std::mutex cv_mutex_;
     std::condition_variable async_cv_;
     std::atomic<bool> stop_requested_{false};
+
+    // Coroutine dispatch primitives
+    quant::infra::AffinityBaton async_baton_;
+    quant::infra::WorkStealingExecutor* async_executor_{nullptr};
 
     std::thread async_worker_;
     std::mutex worker_mutex_;
@@ -235,6 +293,15 @@ void EventBus::publish(std::unique_ptr<Event> event) {
 
 void EventBus::publish_async(std::unique_ptr<Event> event) {
     impl_->publish_async(std::move(event));
+}
+
+quant::infra::CoTask<void> EventBus::co_publish(std::unique_ptr<Event> event) {
+    co_return co_await impl_->co_publish(std::move(event));
+}
+
+quant::infra::CoTask<void>
+EventBus::start_async(quant::infra::WorkStealingExecutor& executor) {
+    co_return co_await impl_->start_async(executor);
 }
 
 void EventBus::replay_history(SubscriptionId id, size_t count) {

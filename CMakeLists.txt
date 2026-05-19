@@ -108,7 +108,10 @@ add_library(quant_infra
     cpp/quant/infra/timer_scheduler.cc
 )
 
-target_include_directories(quant_infra PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(quant_infra PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra
+)
 target_compile_features(quant_infra PUBLIC cxx_std_20)
 
 if(QUANT_USE_FOLLY)
@@ -126,7 +129,11 @@ add_library(quant_logging
     cpp/quant/infra/logging/console_sink.cc
     cpp/quant/infra/logging/metrics.cc
 )
-target_include_directories(quant_logging PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(quant_logging PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra/logging
+)
 target_link_libraries(quant_logging PUBLIC quant_infra)
 
 # ── toml11 (header-only) ──
@@ -142,14 +149,22 @@ add_library(quant_config
     cpp/quant/infra/config/yaml_source.cc
     cpp/quant/infra/config/toml_source.cc
 )
-target_include_directories(quant_config PUBLIC ${CMAKE_SOURCE_DIR} ${TOML11_INCLUDE_DIR})
+target_include_directories(quant_config PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra/config
+    ${TOML11_INCLUDE_DIR}
+)
 target_link_libraries(quant_config PUBLIC quant_infra yaml-cpp::yaml-cpp)
 
 # ── event library ──
 add_library(quant_event
     cpp/quant/event/event_bus.cc
 )
-target_include_directories(quant_event PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(quant_event PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra
+)
 target_link_libraries(quant_event PUBLIC quant_infra)
 
 # ── storage library ──
@@ -180,12 +195,17 @@ add_library(quant_scheduler
     cpp/quant/scheduler/scheduler_service.cc
     cpp/quant/scheduler/execution_dag.cc
 )
-target_include_directories(quant_scheduler PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(quant_scheduler PUBLIC
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/cpp/quant/infra
+    ${CMAKE_SOURCE_DIR}/cpp/quant/scheduler
+)
 target_link_libraries(quant_scheduler PUBLIC quant_infra)
 
 # ── factor library ──
 add_library(quant_factor
     cpp/quant/factor/factor_registry.cc
+    cpp/quant/factor/factor_dag.cc
     cpp/quant/factor/factor_computer.cc
     cpp/quant/factor/built_in_factors.cc
 )
@@ -197,9 +217,25 @@ add_library(quant_network
     cpp/quant/network/tcp_connection.cc
     cpp/quant/network/websocket_server.cc
     cpp/quant/network/ws_session.cc
+    cpp/quant/network/co_io.cc
 )
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR})
+target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
 target_link_libraries(quant_network PUBLIC quant_infra)
+
+if(QUANT_USE_FOLLY)
+    # liburing for io_uring support in CoIouring
+    # Use system liburing (2.5, compatible with kernel 6.17)
+    find_path(SYSTEM_LIBURING_INCLUDE NAMES liburing.h PATHS /usr/include)
+    if(SYSTEM_LIBURING_INCLUDE)
+        target_include_directories(quant_network PUBLIC ${SYSTEM_LIBURING_INCLUDE})
+    endif()
+    find_library(SYSTEM_LIBURING_LIB NAMES uring liburing PATHS /usr/lib/x86_64-linux-gnu)
+    if(SYSTEM_LIBURING_LIB)
+        target_link_libraries(quant_network PUBLIC ${SYSTEM_LIBURING_LIB})
+        target_compile_definitions(quant_network PUBLIC QUANT_USE_LIBURING)
+    endif()
+endif()
 
 # ── risk library ──
 add_library(quant_risk
@@ -348,4 +384,62 @@ if(QUANT_USE_FOLLY)
     add_executable(folly_smoke_test cpp/test/folly_smoke_test.cc)
     target_link_libraries(folly_smoke_test PRIVATE quant_infra folly GTest::gtest_main)
     add_test(NAME folly_smoke_test COMMAND folly_smoke_test)
+endif()
+
+# ── Coroutine-aware component tests ──
+if(QUANT_USE_FOLLY)
+    add_executable(wave_scheduler_co_test cpp/test/wave_scheduler_co_test.cc)
+    target_include_directories(wave_scheduler_co_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(wave_scheduler_co_test PRIVATE quant_scheduler quant_infra folly GTest::gtest_main)
+    add_test(NAME wave_scheduler_co_test COMMAND wave_scheduler_co_test)
+endif()
+
+if(QUANT_USE_FOLLY)
+    add_executable(cron_scheduler_co_test cpp/test/cron_scheduler_co_test.cc)
+    target_include_directories(cron_scheduler_co_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(cron_scheduler_co_test PRIVATE quant_scheduler quant_infra folly GTest::gtest_main)
+    add_test(NAME cron_scheduler_co_test COMMAND cron_scheduler_co_test)
+endif()
+
+if(QUANT_USE_FOLLY)
+    add_executable(event_bus_co_test cpp/test/event_bus_co_test.cc)
+    target_include_directories(event_bus_co_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(event_bus_co_test PRIVATE quant_event quant_infra folly GTest::gtest_main)
+    add_test(NAME event_bus_co_test COMMAND event_bus_co_test)
+endif()
+
+if(QUANT_USE_FOLLY)
+    add_executable(logger_co_test cpp/test/logger_co_test.cc)
+    target_include_directories(logger_co_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(logger_co_test PRIVATE quant_logging quant_infra folly GTest::gtest_main)
+    add_test(NAME logger_co_test COMMAND logger_co_test)
+endif()
+
+if(QUANT_USE_FOLLY)
+    add_executable(config_co_test cpp/test/config_co_test.cc)
+    target_include_directories(config_co_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(config_co_test PRIVATE quant_config quant_infra folly GTest::gtest_main)
+    add_test(NAME config_co_test COMMAND config_co_test)
+endif()
+
+# ── CoIouring (io_uring coroutine I/O) test ──
+
+if(QUANT_USE_FOLLY)
+    add_executable(integration_test cpp/test/integration_test.cc)
+    target_include_directories(integration_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra ${CMAKE_SOURCE_DIR}/cpp/quant/scheduler)
+    target_link_libraries(integration_test PRIVATE quant_scheduler quant_infra folly GTest::gtest_main)
+    add_test(NAME integration_test COMMAND integration_test)
+endif()
+
+if(QUANT_USE_FOLLY)
+    add_executable(co_io_test cpp/test/co_io_test.cc)
+    target_include_directories(co_io_test PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(co_io_test PRIVATE quant_network quant_infra folly GTest::gtest_main)
+    if(DEFINED SYSTEM_LIBURING_INCLUDE)
+        target_include_directories(co_io_test PRIVATE ${SYSTEM_LIBURING_INCLUDE})
+    endif()
+    if(DEFINED SYSTEM_LIBURING_LIB)
+        target_link_libraries(co_io_test PRIVATE ${SYSTEM_LIBURING_LIB})
+    endif()
+    add_test(NAME co_io_test COMMAND co_io_test)
 endif()
