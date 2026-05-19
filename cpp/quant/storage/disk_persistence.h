@@ -8,10 +8,15 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "cpp/quant/infra/coroutine.h"
 
 #include "cpp/quant/storage/column_block.h"
 
+namespace quant::network { class CoIouring; }
+
 namespace quant::storage {
+
+using infra::CoTask;
 
 // ── Sync mode for write durability ──
 enum class SyncMode : uint8_t {
@@ -90,6 +95,16 @@ public:
     const std::filesystem::path& data_dir() const noexcept { return data_dir_; }
     SyncMode sync_mode() const noexcept { return sync_mode_; }
 
+public:
+    void set_io_uring(quant::network::CoIouring* ring) noexcept { ring_ = ring; }
+
+    CoTask<std::string> co_write_segment(
+        std::string_view symbol, uint8_t data_type,
+        const std::vector<ColumnBlock>& blocks,
+        int64_t begin_ts, int64_t end_ts);
+    CoTask<std::vector<ColumnBlock>> co_read_segment(
+        std::string_view filename) const;
+
 private:
     static void do_fsync(int fd);
     std::string segment_filename(std::string_view symbol,
@@ -98,6 +113,7 @@ private:
 
     std::filesystem::path data_dir_;
     SyncMode sync_mode_;
+    quant::network::CoIouring* ring_{nullptr};
 };
 
 }  // namespace quant::storage

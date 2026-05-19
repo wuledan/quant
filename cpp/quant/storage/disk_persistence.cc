@@ -213,4 +213,18 @@ void DiskPersistence::do_fsync(int fd) {
 #endif
 }
 
+// ── Coroutine I/O wrappers ──
+
+CoTask<std::string> DiskPersistence::co_write_segment(
+    std::string_view symbol, uint8_t data_type,
+    const std::vector<ColumnBlock>& blocks,
+    int64_t begin_ts, int64_t end_ts) {
+    co_return write_segment(symbol, data_type, blocks, begin_ts, end_ts);
+}
+
+CoTask<std::vector<ColumnBlock>> DiskPersistence::co_read_segment(
+    std::string_view filename) const {
+    co_return read_segment(filename);
+}
+
 }  // namespace quant::storage
