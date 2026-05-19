@@ -1,4 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Policy CMP0099: Allow INTERFACE link targets from build directories
+# This is needed because Folly's folly_deps target references build-dir paths
+# when using FetchContent for dependencies like fast_float.
+cmake_policy(SET CMP0099 NEW)
+cmake_policy(SET CMP0150 NEW)
+
 project(quant_invest LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -13,19 +20,102 @@ add_compile_options(
     -Wno-missing-field-initializers
 )
 
+# ── FetchContent (must come before any add_library that needs deps) ──
+include(FetchContent)
+
+# ── yaml-cpp ──
+FetchContent_Declare(
+    yaml-cpp
+    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
+# ── Folly dependencies ──
+option(QUANT_USE_FOLLY "Enable Folly coroutine primitives" ON)
+if(QUANT_USE_FOLLY)
+    # FastFloat: header-only library required by Folly.
+    # Must install headers OUTSIDE the project source/build tree to avoid
+    # CMake rejecting the path in folly_deps INTERFACE_INCLUDE_DIRECTORIES.
+    # Use /tmp/quant_deps as staging location (persists across rebuilds).
+    set(QUANT_DEPS_DIR "${CMAKE_HOME}/.quant_deps")
+    if(NOT EXISTS "${QUANT_DEPS_DIR}")
+        set(QUANT_DEPS_DIR "/tmp/quant_deps")
+    endif()
+    set(FASTFLOAT_INSTALL_DIR "${QUANT_DEPS_DIR}/fast_float")
+    if(NOT EXISTS "${FASTFLOAT_INSTALL_DIR}/include/fast_float/fast_float.h")
+        FetchContent_Declare(
+            fast_float
+            GIT_REPOSITORY https://github.com/fastfloat/fast_float.git
+            GIT_TAG v7.0.0
+        )
+        FetchContent_MakeAvailable(fast_float)
+        file(COPY "${fast_float_SOURCE_DIR}/include/fast_float" DESTINATION "${FASTFLOAT_INSTALL_DIR}/include")
+    endif()
+    set(FASTFLOAT_INCLUDE_DIR "${FASTFLOAT_INSTALL_DIR}/include" CACHE PATH "FastFloat include dir")
+
+    # Fetch newer liburing headers OUTSIDE the build tree to avoid CMake policy errors.
+    # System version (2.5) lacks IORING_OP_RECV_ZC needed by Folly v2025.
+    set(LIBURING_HEADERS_DIR "/tmp/quant_deps/liburing")
+    if(NOT EXISTS "${LIBURING_HEADERS_DIR}/src/include/liburing.h")
+        FetchContent_Declare(
+            _liburing_fetch
+            GIT_REPOSITORY https://github.com/axboe/liburing.git
+            GIT_TAG liburing-2.9
+            SOURCE_DIR "${LIBURING_HEADERS_DIR}"
+        )
+        FetchContent_Populate(_liburing_fetch)
+    endif()
+    set(LIBURING_INCLUDE_DIR "${LIBURING_HEADERS_DIR}/src/include" CACHE PATH "" FORCE)
+    find_library(SYSTEM_LIBURING_LIB NAMES uring liburing PATHS /usr/lib/x86_64-linux-gnu NO_DEFAULT_PATH)
+    if(SYSTEM_LIBURING_LIB)
+        set(LIBURING_LIBRARY "${SYSTEM_LIBURING_LIB}" CACHE FILEPATH "" FORCE)
+    endif()
+
+    FetchContent_Declare(
+        folly
+        GIT_REPOSITORY https://github.com/facebook/folly.git
+        GIT_TAG v2025.09.15.00
+    )
+    set(FOLLY_BUILD_SHARED OFF CACHE BOOL "")
+    set(FOLLY_USE_SIMDHASH OFF CACHE BOOL "")
+    # Populate Folly source first (without building) so we can patch out
+    # io_uring files that require newer kernel features (IORING_OP_RECV_ZC etc).
+    FetchContent_GetProperties(folly POPULATED folly_populated)
+    if(NOT folly_populated)
+        FetchContent_Populate(folly)
+        file(REMOVE
+            "${folly_SOURCE_DIR}/folly/io/async/IoUring.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/IoUringBackend.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/IoUringEvent.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/IoUringEventBaseLocal.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/IoUringProvidedBufferRing.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/IoUringZeroCopyBufferPool.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/SimpleAsyncIO.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/AsyncIoUringSocket.cpp"
+            "${folly_SOURCE_DIR}/folly/io/async/EventBasePoller.cpp"
+        )
+        add_subdirectory(${folly_SOURCE_DIR} ${folly_BINARY_DIR} EXCLUDE_FROM_ALL)
+    endif()
+endif()
+
 # ── infra library ──
 add_library(quant_infra
     cpp/quant/infra/error_codes.cc
     cpp/quant/infra/memory_pool.cc
-    cpp/quant/infra/thread_pool.cc
+    cpp/quant/infra/work_stealing_executor.cc
     cpp/quant/infra/time_utils.cc
+    cpp/quant/infra/affinity_baton.cc
+    cpp/quant/infra/timer_scheduler.cc
 )
 
 target_include_directories(quant_infra PUBLIC ${CMAKE_SOURCE_DIR})
 target_compile_features(quant_infra PUBLIC cxx_std_20)
 
 if(QUANT_USE_FOLLY)
-    target_link_libraries(quant_infra PUBLIC Folly::folly)
+    # FetchContent builds use the target name without namespace (folly, folly_coro),
+    # while find_package uses the namespace (Folly::folly, Folly::folly_coro).
+    # Since we use FetchContent, reference the un-namespaced targets.
+    target_link_libraries(quant_infra PUBLIC folly)
     target_compile_definitions(quant_infra PUBLIC QUANT_USE_FOLLY)
 endif()
 
@@ -43,27 +133,6 @@ target_link_libraries(quant_logging PUBLIC quant_infra)
 set(TOML11_INCLUDE_DIR /home/wuledan/work/3FS/third_party/toml11)
 if(NOT EXISTS ${TOML11_INCLUDE_DIR}/toml.hpp)
     message(FATAL_ERROR "toml11 not found at ${TOML11_INCLUDE_DIR}")
-endif()
-
-# ── yaml-cpp ──
-include(FetchContent)
-FetchContent_Declare(
-    yaml-cpp
-    URL https://github.com/jbeder/yaml-cpp/archive/refs/tags/yaml-cpp-0.7.0.tar.gz
-)
-FetchContent_MakeAvailable(yaml-cpp)
-
-# ── Folly (optional, for advanced coroutine support) ──
-option(QUANT_USE_FOLLY "Enable Folly coroutine primitives" OFF)
-if(QUANT_USE_FOLLY)
-    FetchContent_Declare(
-        folly
-        GIT_REPOSITORY https://github.com/facebook/folly.git
-        GIT_TAG v2025.05.12.00
-    )
-    set(FOLLY_BUILD_SHARED OFF CACHE BOOL "")
-    set(FOLLY_USE_SIMDHASH OFF CACHE BOOL "")
-    FetchContent_MakeAvailable(folly)
 endif()
 
 # ── config library ──
@@ -109,6 +178,7 @@ add_library(quant_scheduler
     cpp/quant/scheduler/wave_scheduler.cc
     cpp/quant/scheduler/cron_scheduler.cc
     cpp/quant/scheduler/scheduler_service.cc
+    cpp/quant/scheduler/execution_dag.cc
 )
 target_include_directories(quant_scheduler PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_scheduler PUBLIC quant_infra)
@@ -116,7 +186,6 @@ target_link_libraries(quant_scheduler PUBLIC quant_infra)
 # ── factor library ──
 add_library(quant_factor
     cpp/quant/factor/factor_registry.cc
-    cpp/quant/factor/factor_dag.cc
     cpp/quant/factor/factor_computer.cc
     cpp/quant/factor/built_in_factors.cc
 )
@@ -169,7 +238,6 @@ else()
 endif()
 
 # ── Tests ──
-include(FetchContent)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
@@ -184,9 +252,9 @@ add_executable(error_codes_test cpp/test/error_codes_test.cc)
 target_link_libraries(error_codes_test PRIVATE quant_infra GTest::gtest_main)
 add_test(NAME error_codes_test COMMAND error_codes_test)
 
-add_executable(thread_pool_test cpp/test/thread_pool_test.cc)
-target_link_libraries(thread_pool_test PRIVATE quant_infra GTest::gtest_main)
-add_test(NAME thread_pool_test COMMAND thread_pool_test)
+add_executable(work_stealing_executor_test cpp/test/work_stealing_executor_test.cc)
+target_link_libraries(work_stealing_executor_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME work_stealing_executor_test COMMAND work_stealing_executor_test)
 
 add_executable(memory_pool_test cpp/test/memory_pool_test.cc)
 target_link_libraries(memory_pool_test PRIVATE quant_infra GTest::gtest_main)
@@ -246,6 +314,15 @@ add_executable(scheduler_test cpp/test/scheduler_test.cc)
 target_link_libraries(scheduler_test PRIVATE quant_scheduler GTest::gtest_main)
 add_test(NAME scheduler_test COMMAND scheduler_test)
 
+add_executable(execution_dag_test cpp/test/execution_dag_test.cc)
+target_link_libraries(execution_dag_test PRIVATE quant_scheduler quant_infra folly GTest::gtest_main)
+add_test(NAME execution_dag_test COMMAND execution_dag_test)
+
+# ── AffinityBaton test ──
+add_executable(affinity_baton_test cpp/test/affinity_baton_test.cc)
+target_link_libraries(affinity_baton_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME affinity_baton_test COMMAND affinity_baton_test)
+
 # ── Coroutine and thread-local stats tests ──
 add_executable(coroutine_test cpp/test/coroutine_test.cc)
 target_link_libraries(coroutine_test PRIVATE quant_infra GTest::gtest_main)
@@ -254,3 +331,21 @@ add_test(NAME coroutine_test COMMAND coroutine_test)
 add_executable(thread_local_stats_test cpp/test/thread_local_stats_test.cc)
 target_link_libraries(thread_local_stats_test PRIVATE quant_infra GTest::gtest_main)
 add_test(NAME thread_local_stats_test COMMAND thread_local_stats_test)
+
+add_executable(chase_lev_deque_test cpp/test/chase_lev_deque_test.cc)
+target_link_libraries(chase_lev_deque_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME chase_lev_deque_test COMMAND chase_lev_deque_test)
+
+# ── TimerScheduler test ──
+if(QUANT_USE_FOLLY)
+    add_executable(timer_scheduler_test cpp/test/timer_scheduler_test.cc)
+    target_link_libraries(timer_scheduler_test PRIVATE quant_infra folly GTest::gtest_main)
+    add_test(NAME timer_scheduler_test COMMAND timer_scheduler_test)
+endif()
+
+# ── Folly smoke test ──
+if(QUANT_USE_FOLLY)
+    add_executable(folly_smoke_test cpp/test/folly_smoke_test.cc)
+    target_link_libraries(folly_smoke_test PRIVATE quant_infra folly GTest::gtest_main)
+    add_test(NAME folly_smoke_test COMMAND folly_smoke_test)
+endif()

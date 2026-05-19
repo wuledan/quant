@@ -1,9 +1,7 @@
-// coroutine_test.cc — Tests for coroutine primitives and PoolAwareAwaiter
+// coroutine_test.cc -- Tests for Folly-based coroutine primitives
 #include "cpp/quant/infra/coroutine.h"
-#include "cpp/quant/infra/thread_pool.h"
 
 #include <gtest/gtest.h>
-
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -11,214 +9,170 @@
 namespace quant::infra {
 namespace {
 
-// ── Baton tests ──
-
-TEST(BatonTest, InitiallyNotPosted) {
-    Baton b;
-    EXPECT_FALSE(b.try_wait());
-}
-
-TEST(BatonTest, PostMakesReady) {
-    Baton b;
-    b.post();
-    EXPECT_TRUE(b.try_wait());
-}
-
-TEST(BatonTest, BlockingWait) {
-    Baton b;
-    std::atomic<bool> waiter_done{false};
-
-    std::thread t([&] {
-        b.wait();
-        waiter_done = true;
-    });
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    EXPECT_FALSE(waiter_done);
-
-    b.post();
-    t.join();
-    EXPECT_TRUE(waiter_done);
-}
-
-TEST(BatonTest, Reset) {
-    Baton b;
-    b.post();
-    EXPECT_TRUE(b.try_wait());
-    b.reset();
-    EXPECT_FALSE(b.try_wait());
-}
-
 // ── CoTask tests ──
 
-CoTask<int> simple_cotask() {
-    co_return 42;
-}
+CoTask<int> return_value() { co_return 42; }
 
-TEST(CoTaskTest, SimpleReturnValue) {
-    auto t = simple_cotask();
-    EXPECT_TRUE(t.valid());
-}
-
-CoTask<int> add_cotask(int a, int b) {
-    co_return a + b;
-}
-
-TEST(CoTaskTest, ParameterizedTask) {
-    auto t = add_cotask(3, 4);
-    EXPECT_TRUE(t.valid());
-}
-
-CoTask<void> void_cotask() {
-    co_return;
+TEST(CoTaskTest, ReturnValue) {
+    auto result = blockingWait(return_value());
+    EXPECT_EQ(result, 42);
 }
 
 TEST(CoTaskTest, VoidTask) {
-    auto t = void_cotask();
-    EXPECT_TRUE(t.valid());
-}
-
-// ── PoolAwareAwaiter tests ──
-
-TEST(PoolAwareAwaiterTest, CoSubmitReturnsValue) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
-
-    auto state = std::make_shared<CoTaskState<int>>();
-    auto* pool_ptr = &pool;
-
-    auto wrapper = [state, pool_ptr]() {
-        state->result.emplace(42);
-        state->completed.store(true, std::memory_order_release);
-        if (state->waiter && !state->resumed.exchange(true, std::memory_order_acq_rel)) {
-            pool_ptr->enqueue_handle(state->waiter);
-        }
-    };
-
-    pool.enqueue_task(Task(std::move(wrapper)));
-
-    int attempts = 0;
-    while (!state->completed.load(std::memory_order_acquire) && attempts < 1000) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        ++attempts;
-    }
-
-    ASSERT_TRUE(state->completed.load());
-    ASSERT_TRUE(state->result.has_value());
-    EXPECT_EQ(state->result.value(), 42);
-
-    pool.stop();
-}
-
-TEST(PoolAwareAwaiterTest, EnqueueHandleResumesOnPool) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
-
-    std::atomic<bool> resumed{false};
-    auto coro = [&]() -> CoTask<void> {
-        resumed = true;
+    bool ok = false;
+    auto task = [&]() -> CoTask<void> {
+        ok = true;
         co_return;
     };
+    blockingWait(task());
+    EXPECT_TRUE(ok);
+}
 
-    auto t = coro();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+CoTask<int> add_values(int a, int b) { co_return a + b; }
+
+TEST(CoTaskTest, ParameterizedTask) {
+    auto result = blockingWait(add_values(3, 4));
+    EXPECT_EQ(result, 7);
+}
+
+TEST(CoTaskTest, ChainedTasks) {
+    auto task = []() -> CoTask<int> {
+        auto a = co_await return_value();
+        auto b = co_await add_values(a, 10);
+        co_return b;
+    };
+    auto result = blockingWait(task());
+    EXPECT_EQ(result, 52);
+}
+
+// ── CoBaton tests (folly::coro::Baton based) ──
+
+TEST(CoBatonTest, InitiallyNotReady) {
+    CoBaton b;
+    EXPECT_FALSE(b.ready());
+}
+
+TEST(CoBatonTest, PostMakesReady) {
+    CoBaton b;
+    b.post_direct();
+    EXPECT_TRUE(b.ready());
+}
+
+TEST(CoBatonTest, PostResumesWaiter) {
+    CoBaton b;
+    std::atomic<bool> resumed{false};
+    std::atomic<bool> started{false};
+
+    auto waiter = [&]() -> CoTask<void> {
+        started = true;
+        co_await b;
+        resumed = true;
+    };
+
+    // Start the waiter coroutine in a background thread
+    std::thread t([&]() { blockingWait(waiter()); });
+
+    // Spin until coroutine starts, then ensure it's suspended on the baton
+    while (!started) {
+        std::this_thread::yield();
+    }
+    EXPECT_FALSE(resumed);
+
+    b.post_direct();
+    t.join();
     EXPECT_TRUE(resumed);
-
-    pool.stop();
 }
 
-TEST(PoolAwareAwaiterTest, CoSubmitNoExtraThreads) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
-
-    for (int i = 0; i < 10; ++i) {
-        auto awaiter = pool.co_submit([i]() { return i * i; });
-    }
-
-    auto stats = pool.stats();
-    EXPECT_GE(stats.tasks_submitted, 10);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    stats = pool.stats();
-    EXPECT_GE(stats.tasks_completed, 10);
-
-    pool.stop();
+TEST(CoBatonTest, ResetAndReuse) {
+    CoBaton b;
+    b.post_direct();
+    EXPECT_TRUE(b.ready());
+    b.reset();
+    EXPECT_FALSE(b.ready());
 }
 
-TEST(PoolAwareAwaiterTest, CoSubmitVoid) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
+// ── CoMutex tests ──
 
-    std::atomic<int> counter{0};
+TEST(CoMutexTest, LockUnlock) {
+    CoMutex mutex;
+    auto task = [&]() -> CoTask<int> {
+        auto lock = co_await mutex.co_scoped_lock();
+        co_return 42;
+    };
+    EXPECT_EQ(blockingWait(task()), 42);
+}
+
+TEST(CoMutexTest, MutualExclusion) {
+    CoMutex mutex;
+    int shared = 0;
+
+    auto worker = [&](int delta) -> CoTask<void> {
+        [[maybe_unused]] auto lock = co_await mutex.co_scoped_lock();
+        shared += delta;
+    };
+
+    blockingWait(collectAll(worker(1), worker(2), worker(3)));
+    EXPECT_EQ(shared, 6);
+}
+
+// ── collectAll tests ──
+
+TEST(CollectAllTest, TwoTasks) {
+    auto task1 = []() -> CoTask<int> { co_return 1; };
+    auto task2 = []() -> CoTask<int> { co_return 2; };
+
+    auto [a, b] = blockingWait(collectAll(task1(), task2()));
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(b, 2);
+}
+
+TEST(CollectAllTest, RangeOfTasks) {
+    std::vector<CoTask<int>> tasks;
     for (int i = 0; i < 5; ++i) {
-        auto awaiter = pool.co_submit([&counter]() { counter.fetch_add(1); });
+        tasks.push_back([](int v) -> CoTask<int> { co_return v; }(i));
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(counter.load(), 5);
-
-    pool.stop();
-}
-
-// ── CoroutineMutex tests ──
-
-TEST(CoroutineMutexTest, BasicLockUnlock) {
-    CoroutineMutex mtx;
-    // Verify construction/destruction
-}
-
-// ── Integration: CoTask + ThreadPool ──
-
-CoTask<int> compute_on_pool(ThreadPool& pool) {
-    co_return 0;
-}
-
-TEST(CoroutineIntegrationTest, CoTaskWithPool) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
-
-    auto t = compute_on_pool(pool);
-    EXPECT_TRUE(t.valid());
-
-    pool.stop();
-}
-
-// ── Handles resumed counter ──
-
-TEST(PoolStatsTest, HandlesResumedCounter) {
-    ThreadPool pool(ThreadPoolConfig{.worker_count = 2});
-    pool.start();
-
-    // Use submit + manual handle enqueue to test the counter
-    std::atomic<int> counter{0};
+    auto results = blockingWait(collectAllRange(std::move(tasks)));
+    ASSERT_EQ(results.size(), 5);
     for (int i = 0; i < 5; ++i) {
-        // Directly test enqueue_handle with a real coroutine
-        auto state = std::make_shared<CoTaskState<int>>();
-        auto* pool_ptr = &pool;
-
-        auto wrapper = [state, pool_ptr, &counter]() {
-            counter.fetch_add(1);
-            state->result.emplace(1);
-            state->completed.store(true, std::memory_order_release);
-            // Simulate what co_submit does: enqueue handle back to pool
-            if (state->waiter && !state->resumed.exchange(true, std::memory_order_acq_rel)) {
-                pool_ptr->enqueue_handle(state->waiter);
-            }
-        };
-
-        pool.enqueue_task(Task(std::move(wrapper)));
+        EXPECT_EQ(results[i], i);
     }
+}
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(counter.load(), 5);
+// ── Exception handling ──
 
-    // Without a coroutine waiter, handles_resumed stays 0 (no waiter registered)
-    // This is correct behavior - only actual coroutine suspensions get resumed
-    auto stats = pool.stats();
-    EXPECT_EQ(stats.handles_resumed, 0u);
+TEST(CoTaskTest, ExceptionPropagation) {
+    auto task = []() -> CoTask<int> {
+        throw std::runtime_error("test error");
+        co_return 0;
+    };
+    EXPECT_THROW(blockingWait(task()), std::runtime_error);
+}
 
-    pool.stop();
+// ── Combined: CoTask + CoBaton + CollectAll ──
+
+TEST(IntegrationTest, BatonAndCollectAll) {
+    CoBaton b1, b2;
+    bool done1 = false, done2 = false;
+
+    auto waiter1 = [&]() -> CoTask<void> {
+        co_await b1;
+        done1 = true;
+    };
+    auto waiter2 = [&]() -> CoTask<void> {
+        co_await b2;
+        done2 = true;
+    };
+
+    auto all = collectAll(waiter1(), waiter2());
+    std::thread t([&]() { blockingWait(std::move(all)); });
+
+    b1.post_direct();
+    b2.post_direct();
+    t.join();
+
+    EXPECT_TRUE(done1);
+    EXPECT_TRUE(done2);
 }
 
 }  // namespace
