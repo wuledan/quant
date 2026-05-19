@@ -265,15 +265,45 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
                 me.yield_count++;
             } else {
                 // Level 3: futex park (CPU utilization ~0%)
-                me.parked.store(true, std::memory_order_release);
+                // parked=true and re-check queue inside the lock to
+                // prevent lost-wakeup: if add() enqueued after our
+                // last queue check, it will either see parked==true
+                // under our lock and wake us, or we see the item now.
                 {
                     std::unique_lock lock(me.park_mutex);
+                    me.parked.store(true, std::memory_order_release);
+
+                    // Re-check global queue while holding park_mutex.
+                    // add() takes park_mutex in wake_one_worker(),
+                    // so this synchronizes with enqueue.
+                    WorkItem late_item;
+                    if (global_queue_.try_dequeue(late_item)) {
+                        // Found work — don't park, execute immediately
+                        me.parked.store(false, std::memory_order_release);
+                        lock.unlock();
+                        me.spin_count = 0;
+                        me.yield_count = 0;
+                        auto task_start = std::chrono::steady_clock::now();
+                        late_item.execute();
+                        auto task_end = std::chrono::steady_clock::now();
+                        auto busy_ns =
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                task_end - task_start)
+                                .count();
+                        me.busy_cycles_ns.fetch_add(
+                            static_cast<uint64_t>(busy_ns),
+                            std::memory_order_relaxed);
+                        me.tasks_completed.fetch_add(
+                            1, std::memory_order_relaxed);
+                        continue;
+                    }
+
                     me.park_cv.wait(lock, [&]() {
                         return !me.parked.load(std::memory_order_acquire) ||
                                !running_.load(std::memory_order_acquire);
                     });
+                    me.parked.store(false, std::memory_order_release);
                 }
-                me.parked.store(false, std::memory_order_release);
 
                 // Reset backoff on wake
                 me.spin_count = 0;
@@ -293,13 +323,10 @@ void WorkStealingExecutor::worker_loop(size_t my_id) {
 // ── Wake helpers ──
 
 void WorkStealingExecutor::wake_one_worker() {
-    // Wake the first parked worker
     for (auto& ws : workers_) {
+        std::lock_guard lock(ws->park_mutex);
         if (ws->parked.load(std::memory_order_acquire)) {
             ws->parked.store(false, std::memory_order_release);
-            {
-                std::lock_guard lock(ws->park_mutex);
-            }
             ws->park_cv.notify_one();
             return;
         }
@@ -308,11 +335,9 @@ void WorkStealingExecutor::wake_one_worker() {
 
 void WorkStealingExecutor::wake_worker(size_t worker_id) {
     auto& ws = *workers_[worker_id];
+    std::lock_guard lock(ws.park_mutex);
     if (ws.parked.load(std::memory_order_acquire)) {
         ws.parked.store(false, std::memory_order_release);
-        {
-            std::lock_guard lock(ws.park_mutex);
-        }
         ws.park_cv.notify_one();
     }
 }

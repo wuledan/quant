@@ -10,10 +10,12 @@
 #pragma once
 
 #include "chase_lev_deque.h"
+#include "affinity_baton.h"
 
 #include <folly/Executor.h>
 #include <folly/Function.h>
 #include <folly/concurrency/UnboundedQueue.h>
+#include <folly/coro/Baton.h>
 #include <folly/coro/Task.h>
 
 #include <atomic>
@@ -155,94 +157,55 @@ private:
 };
 
 // ── co_submit implementation (template, must be in header) ──
+//
+// Pattern: submit callable to executor, then await completion.
+// Uses folly::coro::Baton for signaling but routes the resume through
+// the WorkStealingExecutor to avoid inline resume on a pool worker,
+// which would break blockingWait's fiber scheduling.
 
 template <typename F>
 folly::coro::Task<std::invoke_result_t<F>>
 WorkStealingExecutor::co_submit(F&& func) {
     using R = std::invoke_result_t<F>;
-    using Storage = std::conditional_t<std::is_void_v<R>, std::nullptr_t, R>;
 
     struct SharedState {
-        std::coroutine_handle<> waiter;
-        WorkStealingExecutor* executor;
-        size_t caller_worker_id;
+        folly::coro::Baton baton;
         std::exception_ptr ex;
-        Storage result{};
-        // 0 = running, 1 = completed, 2 = waiter suspended
-        std::atomic<int> state{0};
+        std::conditional_t<std::is_void_v<R>, std::nullptr_t, R> result{};
+        WorkStealingExecutor* executor{nullptr};
     };
+    auto state = std::make_shared<SharedState>();
+    state->executor = this;
 
-    auto shared = std::make_shared<SharedState>();
-    shared->executor = this;
-    shared->caller_worker_id = current_worker_id();
-
-    this->add([func = std::forward<F>(func),
-               shared]() mutable {
-        if constexpr (std::is_void_v<R>) {
-            try {
+    this->add([func = std::forward<F>(func), state]() mutable {
+        try {
+            if constexpr (std::is_void_v<R>) {
                 func();
-            } catch (...) {
-                shared->ex = std::current_exception();
+            } else {
+                state->result = func();
             }
-        } else {
-            try {
-                shared->result = func();
-            } catch (...) {
-                shared->ex = std::current_exception();
-            }
+        } catch (...) {
+            state->ex = std::current_exception();
         }
-        // Atomically mark completed; if waiter already suspended, route back
-        int expected = 0;
-        if (shared->state.compare_exchange_strong(expected, 1,
-                std::memory_order_acq_rel)) {
-            // Was running (0→1), waiter hasn't suspended yet — it will see 1
-        } else {
-            // Was 2 (waiter suspended) — we must resume it
-            shared->executor->add_to_worker(
-                shared->caller_worker_id,
-                [shared]() { shared->waiter.resume(); });
-        }
+        // Route resume through the executor rather than inline resume.
+        // This ensures the coroutine resumes on a pool worker thread
+        // where folly's Task promise can safely manage its state,
+        // rather than resuming inline on whatever thread called post().
+        state->executor->add([state]() {
+            state->baton.post();
+        });
     });
 
-    // Awaiter that handles the completion/suspension race correctly
-    struct Awaiter {
-        std::shared_ptr<SharedState> shared;
+    co_await state->baton;
 
-        bool await_ready() noexcept {
-            return shared->state.load(std::memory_order_acquire) == 1;
-        }
-
-        void await_suspend(std::coroutine_handle<> handle) noexcept {
-            shared->waiter = handle;
-            auto s = shared;  // copy shared_ptr for lambda capture
-            // Try to mark as suspended; if already completed, resume now
-            int expected = 0;
-            if (shared->state.compare_exchange_strong(expected, 2,
-                    std::memory_order_acq_rel)) {
-                // Successfully suspended (0→2), task will resume us
-            } else {
-                // Task already completed (state==1), resume immediately
-                s->executor->add_to_worker(
-                    s->caller_worker_id,
-                    [s]() { s->waiter.resume(); });
-            }
-        }
-
-        auto await_resume() -> std::conditional_t<std::is_void_v<R>, void, R> {
-            if (shared->ex) {
-                std::rethrow_exception(shared->ex);
-            }
-            if constexpr (!std::is_void_v<R>) {
-                return std::move(shared->result);
-            }
-        }
-    };
+    if (state->ex) {
+        std::rethrow_exception(state->ex);
+    }
 
     if constexpr (std::is_void_v<R>) {
-        co_await Awaiter{std::move(shared)};
         co_return;
     } else {
-        co_return co_await Awaiter{std::move(shared)};
+        co_return std::move(state->result);
     }
 }
 

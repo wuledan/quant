@@ -35,3 +35,5 @@ bazel-*
 *.o
 *.a
 *.so
+.cache/
+build_debug/
