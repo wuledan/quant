@@ -176,7 +176,7 @@ add_library(quant_storage
     cpp/quant/storage/storage_engine.cc
 )
 target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(quant_storage PUBLIC quant_event)
+target_link_libraries(quant_storage PUBLIC quant_event quant_network)
 
 # ── execution library ──
 add_library(quant_execution
@@ -218,6 +218,8 @@ add_library(quant_network
     cpp/quant/network/websocket_server.cc
     cpp/quant/network/ws_session.cc
     cpp/quant/network/co_io.cc
+    cpp/quant/network/global_executor.cc
+    cpp/quant/network/global_io.cc
 )
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR})
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR}/cpp/quant/infra)

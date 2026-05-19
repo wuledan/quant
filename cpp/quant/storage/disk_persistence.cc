@@ -12,6 +12,8 @@
 #include <unistd.h>
 #endif
 
+#include "cpp/quant/network/co_io.h"
+
 namespace quant::storage {
 
 DiskPersistence::DiskPersistence(std::filesystem::path data_dir, SyncMode sync_mode)
@@ -213,18 +215,149 @@ void DiskPersistence::do_fsync(int fd) {
 #endif
 }
 
-// ── Coroutine I/O wrappers ──
+// ── Coroutine I/O via io_uring ──
 
 CoTask<std::string> DiskPersistence::co_write_segment(
     std::string_view symbol, uint8_t data_type,
     const std::vector<ColumnBlock>& blocks,
     int64_t begin_ts, int64_t end_ts) {
-    co_return write_segment(symbol, data_type, blocks, begin_ts, end_ts);
+    if (blocks.empty()) co_return std::string{};
+
+    // Fall back to sync path when io_uring is not available
+    if (ring_ == nullptr) {
+        co_return write_segment(symbol, data_type, blocks, begin_ts, end_ts);
+    }
+
+    std::string fname = segment_filename(symbol, data_type, begin_ts);
+    std::filesystem::path fpath = data_dir_ / fname;
+
+    // Open file synchronously (CoIouring does not provide co_open)
+    int fd = ::open(fpath.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        throw std::runtime_error("Cannot open segment file for writing: "
+                                 + fpath.string());
+    }
+
+    // 1. Build header in memory
+    SegmentHeader header{};
+    size_t slen = std::min(symbol.size(), sizeof(header.symbol) - 1);
+    std::memcpy(header.symbol, symbol.data(), slen);
+    header.symbol[slen] = '\0';
+    header.symbol_len = static_cast<uint32_t>(slen);
+    header.data_type = data_type;
+    header.num_blocks = static_cast<uint32_t>(blocks.size());
+    header.segment_begin_ts = begin_ts;
+    header.segment_end_ts = end_ts;
+
+    // 2. Build block index in memory
+    std::vector<BlockIndexEntry> index(blocks.size());
+    uint64_t data_offset = sizeof(SegmentHeader)
+                         + blocks.size() * sizeof(BlockIndexEntry);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        index[i].field = blocks[i].field();
+        index[i].codec = blocks[i].codec();
+        index[i].row_count = static_cast<uint32_t>(blocks[i].row_count());
+        index[i].compressed_size = static_cast<uint32_t>(blocks[i].compressed_size());
+        index[i].offset = data_offset;
+        index[i].min_ts = blocks[i].min_timestamp();
+        index[i].max_ts = blocks[i].max_timestamp();
+        data_offset += blocks[i].compressed_size();
+    }
+
+    // 3. Write header via io_uring
+    off_t offset = 0;
+    ssize_t n = co_await ring_->co_write(fd, &header, sizeof(header), offset);
+    if (n < 0 || static_cast<size_t>(n) != sizeof(header)) {
+        ::close(fd);
+        throw std::runtime_error("io_uring write failed for segment header: "
+                                 + fpath.string());
+    }
+
+    // 4. Write block index via io_uring
+    offset += sizeof(header);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    n = co_await ring_->co_write(fd, index.data(), index_bytes, offset);
+    if (n < 0 || static_cast<size_t>(n) != index_bytes) {
+        ::close(fd);
+        throw std::runtime_error("io_uring write failed for segment index: "
+                                 + fpath.string());
+    }
+
+    // 5. Write compressed block data via io_uring
+    offset += index_bytes;
+    for (const auto& block : blocks) {
+        const auto& data = block.data();
+        n = co_await ring_->co_write(fd, data.data(), data.size(), offset);
+        if (n < 0 || static_cast<size_t>(n) != data.size()) {
+            ::close(fd);
+            throw std::runtime_error("io_uring write failed for segment block: "
+                                     + fpath.string());
+        }
+        offset += data.size();
+    }
+
+    // 6. Sync if needed
+    if (sync_mode_ == SyncMode::kSync) {
+        do_fsync(fd);
+    }
+
+    ::close(fd);
+    co_return fname;
 }
 
 CoTask<std::vector<ColumnBlock>> DiskPersistence::co_read_segment(
     std::string_view filename) const {
-    co_return read_segment(filename);
+    // Fall back to sync path when io_uring is not available
+    if (ring_ == nullptr) {
+        co_return read_segment(filename);
+    }
+
+    std::filesystem::path fpath = data_dir_ / filename;
+
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd < 0) co_return std::vector<ColumnBlock>{};
+
+    // 1. Read header via io_uring
+    SegmentHeader header;
+    ssize_t n = co_await ring_->co_read(fd, &header, sizeof(header), 0);
+    if (n < 0 || static_cast<size_t>(n) != sizeof(header)) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+    if (header.magic != kSegmentMagic) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+
+    // 2. Read block index via io_uring
+    std::vector<BlockIndexEntry> index(header.num_blocks);
+    off_t offset = sizeof(SegmentHeader);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    n = co_await ring_->co_read(fd, index.data(), index_bytes, offset);
+    if (n < 0 || static_cast<size_t>(n) != index_bytes) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+
+    // 3. Read each compressed block via io_uring
+    offset += index_bytes;
+    std::vector<ColumnBlock> result;
+    result.reserve(index.size());
+    for (const auto& entry : index) {
+        std::vector<uint8_t> comp_data(entry.compressed_size);
+        n = co_await ring_->co_read(fd, comp_data.data(), comp_data.size(), offset);
+        if (n < 0 || static_cast<size_t>(n) != comp_data.size()) {
+            ::close(fd);
+            co_return std::vector<ColumnBlock>{};
+        }
+        result.emplace_back(entry.field, entry.codec,
+                            entry.row_count, std::move(comp_data),
+                            entry.min_ts, entry.max_ts);
+        offset += comp_data.size();
+    }
+
+    ::close(fd);
+    co_return result;
 }
 
 }  // namespace quant::storage

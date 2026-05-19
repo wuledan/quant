@@ -3,10 +3,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
 #include <thread>
 #include <vector>
-
-#include <folly/coro/Collect.h>
 
 #include "coroutine.h"
 #include "work_stealing_executor.h"
@@ -151,11 +150,18 @@ WaveScheduler::execute_async(
     auto start = std::chrono::high_resolution_clock::now();
 
     for (auto& level : levels) {
-        // Use add() + Baton to schedule each task directly on the executor.
-        // This avoids the complex co_withExecutor/co_submit wrapping needed
-        // to run tasks on a different executor from within collectAllRange.
+        // Use add() + promise/future to schedule each task directly on the
+        // executor. This avoids the complex co_withExecutor/co_submit wrapping
+        // needed to run tasks on a different executor from within collectAllRange.
+        // std::promise+future is used instead of a Baton because the coroutine
+        // runs on ManualExecutor (from blockingWait), which doesn't integrate
+        // with WorkStealingExecutor's thread-affine resumption.
+        // A mutex protects the shared result struct since multiple workers
+        // update completed_tasks/failed_tasks/task_timings concurrently.
         std::atomic<size_t> remaining{level.size()};
-        folly::coro::Baton baton;
+        std::promise<void> level_promise;
+        auto level_future = level_promise.get_future();
+        std::mutex result_mutex;
 
         for (TaskId id : level) {
             executor.add([&, id]() {
@@ -184,20 +190,23 @@ WaveScheduler::execute_async(
                 auto duration = std::chrono::duration_cast<
                     std::chrono::nanoseconds>(tend - tstart).count();
 
-                if (task->status.load() == TaskStatus::kCompleted) {
-                    result.completed_tasks++;
-                } else {
-                    result.failed_tasks++;
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    if (task->status.load() == TaskStatus::kCompleted) {
+                        result.completed_tasks++;
+                    } else {
+                        result.failed_tasks++;
+                    }
+                    result.task_timings.emplace_back(id, duration);
                 }
-                result.task_timings.emplace_back(id, duration);
 
                 if (remaining.fetch_sub(1) == 1) {
-                    baton.post();
+                    level_promise.set_value();
                 }
             });
         }
 
-        co_await baton;
+        level_future.wait();
     }
 
     auto end = std::chrono::high_resolution_clock::now();

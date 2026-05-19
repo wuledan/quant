@@ -153,13 +153,19 @@ CoTask<bool> WebSocketServer::co_send(const std::string& session_id, const std::
     stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
     stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
 
+    // Extract target fd under lock, then send outside lock to avoid
+    // holding std::mutex across co_await (undefined behavior).
+    int target_fd = -1;
     if (ring_ != nullptr) {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         auto it = impl_->session_to_fd.find(session_id);
         if (it != impl_->session_to_fd.end()) {
-            ssize_t n = co_await ring_->co_send(it->second, frame.data(), frame.size(), MSG_NOSIGNAL);
-            co_return n > 0;
+            target_fd = it->second;
         }
+    }
+    if (target_fd >= 0) {
+        ssize_t n = co_await ring_->co_send(target_fd, frame.data(), frame.size(), MSG_NOSIGNAL);
+        co_return n > 0;
     }
     co_return true;
 }
@@ -169,13 +175,18 @@ CoTask<bool> WebSocketServer::co_send_binary(const std::string& session_id, cons
     stats_.messages_sent.fetch_add(1, std::memory_order_relaxed);
     stats_.bytes_sent.fetch_add(frame.size(), std::memory_order_relaxed);
 
+    // Extract target fd under lock, then send outside lock.
+    int target_fd = -1;
     if (ring_ != nullptr) {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         auto it = impl_->session_to_fd.find(session_id);
         if (it != impl_->session_to_fd.end()) {
-            ssize_t n = co_await ring_->co_send(it->second, frame.data(), frame.size(), MSG_NOSIGNAL);
-            co_return n > 0;
+            target_fd = it->second;
         }
+    }
+    if (target_fd >= 0) {
+        ssize_t n = co_await ring_->co_send(target_fd, frame.data(), frame.size(), MSG_NOSIGNAL);
+        co_return n > 0;
     }
     co_return true;
 }
@@ -188,9 +199,17 @@ CoTask<void> WebSocketServer::co_broadcast(const std::string& message) {
     stats_.bytes_sent.fetch_add(frame.size() * session_count(), std::memory_order_relaxed);
 
     if (ring_ != nullptr) {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
-        for (const auto& [fid, sid] : impl_->fd_to_session) {
-            co_await ring_->co_send(fid, frame.data(), frame.size(), MSG_NOSIGNAL);
+        // Collect all target fds under lock, then send outside lock.
+        std::vector<int> targets;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            targets.reserve(impl_->fd_to_session.size());
+            for (const auto& [fid, sid] : impl_->fd_to_session) {
+                targets.push_back(fid);
+            }
+        }
+        for (int target_fd : targets) {
+            co_await ring_->co_send(target_fd, frame.data(), frame.size(), MSG_NOSIGNAL);
         }
     }
 }

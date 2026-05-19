@@ -4,9 +4,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <queue>
-#include <folly/coro/Baton.h>
 
 namespace quant::scheduler {
 
@@ -134,12 +134,13 @@ ExecutionDAG::co_execute(infra::WorkStealingExecutor& executor) {
         std::atomic<size_t> completed{0};
         std::atomic<size_t> failed{0};
         size_t level_size = levels[i].size();
-        folly::coro::Baton level_done;
+        std::promise<void> level_promise;
+        auto level_future = level_promise.get_future();
 
         for (auto id : levels[i]) {
             auto& node = tasks_[id];
             executor.add([&node, &any_failed, &error_mutex, &combined_error,
-                          &completed, &failed, level_size, &level_done]() {
+                          &completed, &failed, level_size, &level_promise]() {
                 try {
                     // node.func() returns folly::coro::Task<void>
                     // For now, execute synchronously within this worker
@@ -158,12 +159,12 @@ ExecutionDAG::co_execute(infra::WorkStealingExecutor& executor) {
 
                 if (completed.fetch_add(1, std::memory_order_acq_rel) + 1
                     == level_size) {
-                    level_done.post();
+                    level_promise.set_value();
                 }
             });
         }
 
-        co_await level_done;
+        level_future.wait();
 
         auto level_end = std::chrono::steady_clock::now();
         auto level_ms =
