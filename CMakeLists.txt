@@ -424,6 +424,14 @@ if(QUANT_USE_FOLLY)
     add_test(NAME config_co_test COMMAND config_co_test)
 endif()
 
+# ── Engine benchmark ──
+if(QUANT_USE_FOLLY)
+    add_executable(engine_benchmark cpp/test/engine_benchmark.cc)
+    target_include_directories(engine_benchmark PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+    target_link_libraries(engine_benchmark PRIVATE quant_scheduler quant_infra folly GTest::gtest_main)
+    add_test(NAME engine_benchmark COMMAND engine_benchmark)
+endif()
+
 # ── CoIouring (io_uring coroutine I/O) test ──
 
 if(QUANT_USE_FOLLY)

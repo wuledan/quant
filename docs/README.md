@@ -15,3 +15,12 @@
 ## 前端与交互
 
 - [前端与交互架构](architecture_frontend.md) — 前端页面、飞书机器人、API设计、系统交互流程
+
+## 协程化改造
+
+- [协程化改造设计](design_coroutine_refactor.md) — 全协程化改造方案
+
+## 技术决策与性能
+
+- [技术决策记录](technical_decisions.md) — AffinityBaton、CoMutex、io_uring 等关键技术选型
+- [性能基准报告](benchmark_report.md) — Executor/DAG/协程性能测试数据
