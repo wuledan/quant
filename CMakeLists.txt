@@ -255,6 +255,12 @@ add_library(quant_ingest
 target_include_directories(quant_ingest PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_ingest PUBLIC quant_storage quant_event quant_network)
 
+# ── IR library ──
+add_library(quant_ir
+    cpp/quant/ir/ir_graph.cc
+)
+target_include_directories(quant_ir PUBLIC ${CMAKE_SOURCE_DIR})
+
 # ── pybind11 module (optional, requires pybind11 installed) ──
 find_package(pybind11 CONFIG QUIET)
 if(pybind11_FOUND)
@@ -466,3 +472,8 @@ if(QUANT_USE_FOLLY)
     endif()
     add_test(NAME co_io_test COMMAND co_io_test)
 endif()
+
+# ── IR graph test ──
+add_executable(ir_graph_test cpp/test/ir_graph_test.cc)
+target_link_libraries(ir_graph_test PRIVATE quant_ir GTest::gtest_main)
+add_test(NAME ir_graph_test COMMAND ir_graph_test)
