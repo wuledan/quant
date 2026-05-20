@@ -145,9 +145,35 @@ void bind_execution(py::module_& m) {
         .def("on_order_suspended", &OrderManager::on_order_suspended, py::arg("order_id"))
         .def("find_order", &OrderManager::find_order, py::arg("order_id"),
              py::return_value_policy::reference)
-        .def("find_orders_by_symbol", &OrderManager::find_orders_by_symbol, py::arg("symbol"))
-        .def("find_orders_by_status", &OrderManager::find_orders_by_status, py::arg("status"))
-        .def("all_orders", &OrderManager::all_orders)
+        .def("find_orders_by_symbol",
+             [](OrderManager& om, const std::string& symbol) -> py::list {
+                 auto orders = om.find_orders_by_symbol(symbol);
+                 py::list result;
+                 for (auto* order : orders) {
+                     result.append(py::cast(order, py::return_value_policy::reference));
+                 }
+                 return result;
+             },
+             py::arg("symbol"))
+        .def("find_orders_by_status",
+             [](OrderManager& om, OrderStatus status) -> py::list {
+                 auto orders = om.find_orders_by_status(status);
+                 py::list result;
+                 for (auto* order : orders) {
+                     result.append(py::cast(order, py::return_value_policy::reference));
+                 }
+                 return result;
+             },
+             py::arg("status"))
+        .def("all_orders",
+             [](OrderManager& om) -> py::list {
+                 auto orders = om.all_orders();
+                 py::list result;
+                 for (auto* order : orders) {
+                     result.append(py::cast(order, py::return_value_policy::reference));
+                 }
+                 return result;
+             })
         .def_property_readonly("total_order_count", &OrderManager::total_order_count)
         .def_property_readonly("active_order_count", &OrderManager::active_order_count);
 

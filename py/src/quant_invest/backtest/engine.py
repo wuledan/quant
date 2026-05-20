@@ -53,7 +53,11 @@ class _BacktestContext:
 
 
 class BacktestEngine:
-    """事件驱动回测引擎"""
+    """事件驱动回测引擎
+
+    支持 C++ OrderManager 执行模式（use_cpp_execution=True），
+    默认使用 Python SimulatedBroker（向后兼容）。
+    """
 
     def __init__(
         self,
@@ -64,6 +68,7 @@ class BacktestEngine:
         initial_cash: float = 1_000_000.0,
         benchmark: str = "000300.SH",
         on_progress: Any | None = None,
+        use_cpp_execution: bool = False,
     ) -> None:
         self.data_handler = data_handler
         self.broker = broker
@@ -77,6 +82,12 @@ class BacktestEngine:
         self._logger = logging.getLogger("quant_invest.backtest")
         # 进度回调: on_progress(current_bar, total_bars, message)
         self._on_progress = on_progress
+
+        # C++ OrderManager 执行模式
+        self._use_cpp_execution = use_cpp_execution
+        self._order_adapter: Any | None = None
+        if use_cpp_execution:
+            self._init_cpp_execution()
 
     def run(
         self,
@@ -141,7 +152,10 @@ class BacktestEngine:
         orders = self.portfolio.generate_orders(signals, market_event)
 
         # 5. 模拟执行
-        fills = self.broker.execute_orders(orders, market_event)
+        if self._use_cpp_execution and self._order_adapter is not None:
+            fills = self._execute_orders_cpp(orders, market_event)
+        else:
+            fills = self.broker.execute_orders(orders, market_event)
         self._fills.extend(fills)
 
         if fills:
@@ -157,6 +171,68 @@ class BacktestEngine:
         self.portfolio.initialize(self.initial_cash)
         self.strategy.on_init(self._ctx)
         self._logger.info("策略初始化完成, 数据bar数: %d", len(self.data_handler._dates))
+
+    def _init_cpp_execution(self) -> None:
+        """初始化 C++ OrderManager 执行模式."""
+        try:
+            from ..execution.order_adapter import OrderAdapter
+
+            self._order_adapter = OrderAdapter()
+            if not self._order_adapter.cpp_available:
+                self._logger.warning(
+                    "C++ 执行引擎不可用，回退到 Python SimulatedBroker"
+                )
+                self._use_cpp_execution = False
+                self._order_adapter = None
+                return
+
+            self._order_adapter.connect_broker()
+            self._logger.info("C++ OrderManager 执行模式已启用")
+        except Exception as e:
+            self._logger.warning("C++ 执行模式初始化失败: %s，回退到 Python", e)
+            self._use_cpp_execution = False
+            self._order_adapter = None
+
+    def _execute_orders_cpp(
+        self,
+        orders: list,
+        market_event: Any,
+    ) -> list[FillEvent]:
+        """使用 C++ OrderManager 执行订单.
+
+        将 OrderEvent 转换为 OrderAdapter.submit_order() 调用，
+        然后将成交结果转回 FillEvent 列表。
+        """
+        if self._order_adapter is None:
+            return []
+
+        fills: list[FillEvent] = []
+        for order in orders:
+            # OrderEvent → OrderAdapter.submit_order()
+            side = "BUY" if order.direction == "BUY" else "SELL"
+            order_type = "LIMIT" if order.order_type == "LIMIT" else "MARKET"
+
+            result = self._order_adapter.submit_order(
+                symbol=order.symbol,
+                side=side,
+                order_type=order_type,
+                price=order.price,
+                quantity=order.quantity,
+            )
+
+            if result.success and result.filled_qty > 0:
+                fills.append(FillEvent(
+                    timestamp=order.timestamp,
+                    symbol=order.symbol,
+                    direction=order.direction,
+                    quantity=result.filled_qty,
+                    fill_price=result.fill_price,
+                    commission=0.0,  # C++ 模式暂不计算手续费
+                    slippage=0.0,
+                    order_id=str(result.order_id),
+                ))
+
+        return fills
 
     def _update_market_value(self, market_event: MarketEvent) -> None:
         """用当前市价更新持仓市值."""
