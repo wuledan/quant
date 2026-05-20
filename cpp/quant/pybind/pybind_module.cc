@@ -60,9 +60,13 @@ public:
         return {ptr, size};
     }
 
-    void* get(const std::string& name) const {
+    void* get(const std::string& name, size_t* out_size = nullptr) const {
         auto it = buffers_.find(name);
-        return it != buffers_.end() ? it->second.data : nullptr;
+        if (it != buffers_.end()) {
+            if (out_size) *out_size = it->second.size;
+            return it->second.data;
+        }
+        return nullptr;
     }
 
     void release(const std::string& name) {
@@ -115,11 +119,13 @@ PYBIND11_MODULE(_quant_core, m) {
         return info;
     }, py::arg("name"), py::arg("size"));
 
-    shm.def("get", [](const std::string& name) -> py::dict {
-        auto* addr = global_shm_pool().get(name);
+    shm.def("get", [](const std::string& name) -> py::object {
+        size_t size = 0;
+        auto* addr = global_shm_pool().get(name, &size);
         if (!addr) return py::none();
         py::dict info;
         info["name"] = name;
+        info["size"] = size;
         info["address"] = reinterpret_cast<uintptr_t>(addr);
         return info;
     }, py::arg("name"));

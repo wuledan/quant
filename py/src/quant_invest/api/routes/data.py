@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
-"""数据查询路由.
-
-端点:
-- GET  /daily/{symbol}        日线数据
-- GET  /minute/{symbol}       分钟线数据
-- GET  /financial/{symbol}    财务数据
-- GET  /macro/{indicator}     宏观数据
-- GET  /trade_calendar        交易日历
-- GET  /index_constituents    指数成分股
-"""
+"""数据查询路由 — 优先从本地缓存提供, 缓存未命中时实时拉取."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from datetime import date
 
-from ..schemas import DailyBarResponse, FinancialDataResponse, MacroDataResponse, MinuteBarResponse
+from fastapi import APIRouter, HTTPException, Query
+
+from ..schemas import DailyBarResponse
+from ...data.scheduler import get_scheduler
 
 router = APIRouter()
 
@@ -24,50 +18,41 @@ async def get_daily_bars(
     symbol: str,
     start_date: str = Query("", description="开始日期 YYYY-MM-DD"),
     end_date: str = Query("", description="结束日期 YYYY-MM-DD"),
-    adjust: str = Query("none", description="复权方式 none/forward/backward"),
-    limit: int = Query(1000, description="返回条数", le=10000),
+    adjust: str = Query("forward", description="复权方式 none/forward/backward"),
 ) -> DailyBarResponse:
-    """获取日线数据."""
-    return DailyBarResponse(symbol=symbol, data=[], count=0)
+    """获取日线数据 — 优先本地缓存, 缓存无数据时实时拉取."""
+    try:
+        sd = date.fromisoformat(start_date) if start_date else None
+        ed = date.fromisoformat(end_date) if end_date else None
 
+        scheduler = get_scheduler()
+        df = scheduler.get_daily_data(symbol, start_date=sd, end_date=ed)
 
-@router.get("/minute/{symbol}", response_model=MinuteBarResponse)
-async def get_minute_bars(
-    symbol: str,
-    date: str = Query("", description="交易日期 YYYY-MM-DD"),
-    frequency: str = Query("1min", description="频率 1min/5min/15min"),
-    limit: int = Query(1000, description="返回条数", le=10000),
-) -> MinuteBarResponse:
-    """获取分钟线数据."""
-    return MinuteBarResponse(symbol=symbol, date=date, data=[], count=0)
+        if df is None or df.empty:
+            # 缓存无数据，尝试实时拉取
+            from quant_invest.data.providers import DataProviderFactory
+            provider = DataProviderFactory.create("yahoo")
+            fetch_sd = sd or date(date.today().year - 1, 1, 1)
+            fetch_ed = ed or date.today()
+            df = provider.get_daily_bars(symbol, fetch_sd, fetch_ed)
 
+        if df is None or df.empty:
+            return DailyBarResponse(symbol=symbol, data=[], count=0)
 
-@router.get("/financial/{symbol}", response_model=FinancialDataResponse)
-async def get_financial(
-    symbol: str,
-    report_type: str = Query("income", description="报表类型 income/balance/cashflow"),
-) -> FinancialDataResponse:
-    """获取财务数据."""
-    return FinancialDataResponse(symbol=symbol, report_type=report_type)
-
-
-@router.get("/macro/{indicator}", response_model=MacroDataResponse)
-async def get_macro_data(
-    indicator: str,
-    start_date: str = Query("", description="开始日期 YYYY-MM-DD"),
-    end_date: str = Query("", description="结束日期 YYYY-MM-DD"),
-) -> MacroDataResponse:
-    """获取宏观数据.
-
-    indicator 可选: gdp, cpi, pmi, m2, shibor, northbound
-    """
-    valid = {"gdp", "cpi", "pmi", "m2", "shibor", "northbound"}
-    if indicator not in valid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown indicator '{indicator}'. Choose from {sorted(valid)}",
-        )
-    return MacroDataResponse(indicator=indicator, data=[], count=0)
+        records = []
+        for idx, row in df.iterrows():
+            records.append({
+                "date": idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+                "amount": float(row.get("amount", 0)),
+            })
+        return DailyBarResponse(symbol=symbol, data=records, count=len(records))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/trade_calendar")
@@ -76,12 +61,47 @@ async def get_trade_calendar(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
 ) -> dict:
     """获取交易日历."""
-    return {"dates": []}
+    try:
+        sd = date.fromisoformat(start_date)
+        ed = date.fromisoformat(end_date)
+        scheduler = get_scheduler()
+        df = scheduler.get_daily_data("000300.SH", start_date=sd, end_date=ed)
+        if df is not None and not df.empty:
+            dates = [d.strftime("%Y-%m-%d") for d in df.index]
+            return {"dates": dates}
+        # fallback: 实时拉取
+        from quant_invest.data.providers import DataProviderFactory
+        provider = DataProviderFactory.create("yahoo")
+        trade_dates = provider.get_trade_calendar(sd, ed)
+        return {"dates": [d.strftime("%Y-%m-%d") for d in trade_dates]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/index_constituents")
 async def get_index_constituents(
-    index_code: str = Query(..., description="指数代码"),
+    index_code: str = Query(..., description="指数代码 如 000300.SH"),
 ) -> dict:
     """获取指数成分股."""
-    return {"index_code": index_code, "constituents": []}
+    try:
+        from quant_invest.data.providers import DataProviderFactory
+        provider = DataProviderFactory.create("yahoo")
+        df = provider.get_index_constituents(index_code)
+        return {"index_code": index_code, "constituents": df.to_dict(orient="records") if not df.empty else []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/health")
+async def data_health() -> dict:
+    """数据源健康检查."""
+    scheduler = get_scheduler()
+    status = scheduler.get_status()
+    return {"status": "ok" if status["running"] else "stopped", "cache": status}
+
+
+@router.get("/scheduler_status")
+async def scheduler_status() -> dict:
+    """调度器详细状态."""
+    scheduler = get_scheduler()
+    return scheduler.get_status()

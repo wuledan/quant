@@ -33,6 +33,7 @@ class DataHandler(ABC):
 class DailyDataHandler(DataHandler):
     """日线数据处理器.
 
+    优先从调度器缓存加载数据，缓存未命中时实时拉取。
     在初始化时预加载所有数据，按时间推进依次返回每根K线。
     """
 
@@ -50,23 +51,63 @@ class DailyDataHandler(DataHandler):
         self._load_data(start_date, end_date, data_provider)
 
     def _load_data(self, start_date: date, end_date: date, data_provider: object) -> None:
-        """预加载所有数据."""
-        from .broker import SimulatedBroker
+        """预加载所有数据 — 优先调度器缓存, 缓存不足时实时拉取."""
+        # 1. 尝试从调度器缓存加载
+        try:
+            from ..data.scheduler import get_scheduler
+            scheduler = get_scheduler()
+            for symbol in self._symbols:
+                df = scheduler.get_daily_data(symbol, start_date=start_date, end_date=end_date)
+                if df is not None and not df.empty:
+                    self._data[symbol] = df
+        except Exception:
+            pass
 
+        # 2. 对缓存未命中或数据不足的标的实时拉取
         for symbol in self._symbols:
-            if hasattr(data_provider, 'get_daily_bars'):
-                try:
-                    df = data_provider.get_daily_bars(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
-                    if not df.empty:
-                        self._data[symbol] = df
-                except Exception:
-                    self._data[symbol] = pd.DataFrame()
+            cached = self._data.get(symbol)
+            if cached is not None and not cached.empty:
+                # 检查缓存是否覆盖了请求的日期范围
+                if self._covers_range(cached, start_date, end_date):
+                    continue
+                # 缓存不足，补充拉取
+                if hasattr(data_provider, 'get_daily_bars'):
+                    try:
+                        df = data_provider.get_daily_bars(symbol=symbol, start_date=start_date, end_date=end_date)
+                        if not df.empty:
+                            # 合并缓存和实时数据
+                            combined = pd.concat([cached, df])
+                            combined = combined[~combined.index.duplicated(keep='last')]
+                            combined.sort_index(inplace=True)
+                            self._data[symbol] = combined
+                    except Exception:
+                        pass
             else:
-                self._data[symbol] = pd.DataFrame()
+                # 完全无缓存，实时拉取
+                if hasattr(data_provider, 'get_daily_bars'):
+                    try:
+                        df = data_provider.get_daily_bars(symbol=symbol, start_date=start_date, end_date=end_date)
+                        if not df.empty:
+                            self._data[symbol] = df
+                    except Exception:
+                        self._data[symbol] = pd.DataFrame()
+                else:
+                    self._data[symbol] = pd.DataFrame()
+
+        # 3. 按请求日期范围裁剪（统一去掉时区避免比较报错）
+        for symbol in self._symbols:
+            df = self._data.get(symbol)
+            if df is not None and not df.empty:
+                # 去掉时区
+                if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+                    self._data[symbol] = df
+                mask = pd.Series(True, index=df.index)
+                if start_date:
+                    mask &= df.index >= pd.Timestamp(start_date)
+                if end_date:
+                    mask &= df.index <= pd.Timestamp(end_date)
+                self._data[symbol] = df[mask]
 
         # 合并统一的时间索引
         all_dates: set[pd.Timestamp] = set()
@@ -75,6 +116,19 @@ class DailyDataHandler(DataHandler):
                 all_dates.update(df.index)
 
         self._dates = sorted(all_dates) if all_dates else []
+
+    @staticmethod
+    def _covers_range(df: pd.DataFrame, start: date, end: date) -> bool:
+        """检查DataFrame是否覆盖了请求的日期范围."""
+        if df.empty:
+            return False
+        df_start = df.index.min().date() if hasattr(df.index.min(), 'date') else df.index.min()
+        df_end = df.index.max().date() if hasattr(df.index.max(), 'date') else df.index.max()
+        if hasattr(df_start, 'year'):
+            df_start = date(df_start.year, df_start.month, df_start.day)
+        if hasattr(df_end, 'year'):
+            df_end = date(df_end.year, df_end.month, df_end.day)
+        return df_start <= start and df_end >= end
 
     def next_bar(self) -> MarketEvent | None:
         """获取下一根K线的市场事件."""

@@ -58,11 +58,37 @@ class RateLimiter:
 class AkshareProvider(DataProvider):
     """AkShare数据源适配器."""
 
+    # 代理相关环境变量键
+    _PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+
     def __init__(self, config: dict | None = None) -> None:
         self._config = config or {}
         self._rate_limiter = RateLimiter(
             calls_per_second=self._config.get("calls_per_second", 5.0)
         )
+        # 是否在请求时临时移除代理（国内数据源不需要走代理）
+        self._bypass_proxy_enabled = self._config.get("bypass_proxy", True)
+
+    def _without_proxy(self):
+        """上下文管理器：临时清除代理环境变量，使 requests 直连."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _ctx():
+            if not self._bypass_proxy_enabled:
+                yield
+                return
+            saved = {}
+            import os
+            for k in self._PROXY_KEYS:
+                if k in os.environ:
+                    saved[k] = os.environ.pop(k)
+            try:
+                yield
+            finally:
+                os.environ.update(saved)
+
+        return _ctx()
 
     @property
     def name(self) -> str:
@@ -85,21 +111,22 @@ class AkshareProvider(DataProvider):
             AdjustMethod.BACKWARD: "hfq",
         }
         self._rate_limiter.wait()
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=symbol,
-                period="daily",
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=adjust_map.get(adjust, "qfq"),
-            )
-        except Exception:
-            df = ak.stock_zh_a_daily(
-                symbol=symbol,
-                start_date=start_date.strftime("%Y%m%d"),
-                end_date=end_date.strftime("%Y%m%d"),
-                adjust=adjust_map.get(adjust, "qfq"),
-            )
+        with self._without_proxy():
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                    adjust=adjust_map.get(adjust, "qfq"),
+                )
+            except Exception:
+                df = ak.stock_zh_a_daily(
+                    symbol=symbol,
+                    start_date=start_date.strftime("%Y%m%d"),
+                    end_date=end_date.strftime("%Y%m%d"),
+                    adjust=adjust_map.get(adjust, "qfq"),
+                )
 
         if df.empty:
             return df

@@ -119,8 +119,21 @@ void bind_execution(py::module_& m) {
     // ── OrderManager ──
     py::class_<OrderManager>(m, "OrderManager")
         .def(py::init<>())
-        .def("create_order", &OrderManager::create_order, py::arg("req"))
-        .def("cancel_order", &OrderManager::cancel_order, py::arg("order_id"))
+        .def("create_order",
+             [](OrderManager& om, const OrderRequest& req) -> py::object {
+                 auto result = om.create_order(req);
+                 if (result.ok()) {
+                     return py::cast(result.value());
+                 }
+                 return py::none();
+             },
+             py::arg("req"))
+        .def("cancel_order",
+             [](OrderManager& om, OrderId order_id) -> bool {
+                 auto result = om.cancel_order(order_id);
+                 return result.ok();
+             },
+             py::arg("order_id"))
         .def("on_order_accepted", &OrderManager::on_order_accepted,
              py::arg("order_id"), py::arg("broker_order_id"))
         .def("on_order_rejected", &OrderManager::on_order_rejected,

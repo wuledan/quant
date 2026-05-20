@@ -154,8 +154,16 @@ class DailyBarCollector:
         if report.level == QualityLevel.ERROR:
             raise ValueError(f"数据质量校验失败: {report.summary}")
 
+    def _normalize_index(self, df: pd.DataFrame) -> pd.DataFrame:
+        """确保索引为无时区的DatetimeIndex，避免Parquet读写时区问题."""
+        if isinstance(df.index, pd.DatetimeIndex):
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+        return df
+
     def _save_parquet(self, symbol: str, new_df: pd.DataFrame) -> None:
         """追加写入Parquet文件。"""
+        new_df = self._normalize_index(new_df)
         path = self._parquet_path(symbol)
         if path.exists():
             existing = pd.read_parquet(path)
@@ -171,7 +179,10 @@ class DailyBarCollector:
         path = self._parquet_path(symbol)
         if not path.exists():
             return pd.DataFrame()
-        df = pd.read_parquet(path)
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            return pd.DataFrame()
         return df[df.index <= pd.Timestamp(end_date)]
 
     def _parquet_path(self, symbol: str) -> Path:

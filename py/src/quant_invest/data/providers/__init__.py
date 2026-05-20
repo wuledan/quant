@@ -5,6 +5,7 @@
 
 from quant_invest.data.providers.akshare_provider import AkshareProvider
 from quant_invest.data.providers.base import AdjustMethod, DataFreq, DataProvider
+from quant_invest.data.providers.yahoo_provider import YahooProvider
 
 
 class DataProviderFactory:
@@ -15,6 +16,7 @@ class DataProviderFactory:
 
     _providers: dict[str, type[DataProvider]] = {
         "akshare": AkshareProvider,
+        "yahoo": YahooProvider,
     }
 
     @classmethod
