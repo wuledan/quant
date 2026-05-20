@@ -248,6 +248,13 @@ add_library(quant_risk
 target_include_directories(quant_risk PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_risk PUBLIC quant_event)
 
+# ── ingest library ──
+add_library(quant_ingest
+    cpp/quant/ingest/data_ingestor.cc
+)
+target_include_directories(quant_ingest PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_ingest PUBLIC quant_storage quant_event quant_network)
+
 # ── pybind11 module (optional, requires pybind11 installed) ──
 find_package(pybind11 CONFIG QUIET)
 if(pybind11_FOUND)
@@ -257,6 +264,7 @@ if(pybind11_FOUND)
         cpp/quant/pybind/py_factor.cc
         cpp/quant/pybind/py_execution.cc
         cpp/quant/pybind/py_risk.cc
+        cpp/quant/pybind/py_ingest.cc
     )
     target_include_directories(_quant_core PRIVATE ${CMAKE_SOURCE_DIR})
     target_link_libraries(_quant_core PRIVATE
@@ -264,6 +272,7 @@ if(pybind11_FOUND)
         quant_factor
         quant_execution
         quant_risk
+        quant_ingest
         quant_event
         quant_infra
     )
@@ -343,6 +352,10 @@ add_test(NAME execution_test COMMAND execution_test)
 add_executable(risk_test cpp/test/risk_test.cc)
 target_link_libraries(risk_test PRIVATE quant_risk GTest::gtest_main)
 add_test(NAME risk_test COMMAND risk_test)
+
+add_executable(data_ingestor_test cpp/quant/ingest/test_data_ingestor.cc)
+target_link_libraries(data_ingestor_test PRIVATE quant_ingest GTest::gtest_main)
+add_test(NAME data_ingestor_test COMMAND data_ingestor_test)
 
 add_executable(network_test cpp/test/network_test.cc)
 target_link_libraries(network_test PRIVATE quant_network GTest::gtest_main)

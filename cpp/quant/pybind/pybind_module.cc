@@ -16,6 +16,11 @@
 #include "cpp/quant/pybind/py_risk.h"
 #include "cpp/quant/pybind/py_storage.h"
 
+// Forward declaration for ingest bindings
+namespace quant::pybind {
+void bind_ingest(pybind11::module_& m);
+}
+
 namespace py = pybind11;
 
 // ── Zero-copy transfer utilities ──
