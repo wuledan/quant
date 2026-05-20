@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <climits>
 
+#include "cpp/quant/infra/coroutine.h"
+#include "cpp/quant/network/co_io.h"
+
 namespace quant::storage {
 
 StorageEngine::StorageEngine(Options opts)
@@ -144,6 +147,111 @@ StoreStatus StorageEngine::close() {
     if (closed_) return StoreStatus::kOk;
     closed_ = true;
     return store_->close();
+}
+
+// ── Coroutine API ──
+
+void StorageEngine::set_io_uring(quant::network::CoIouring* ring) noexcept {
+    store_->disk().set_io_uring(ring);
+}
+
+CoTask<StoreStatus> StorageEngine::co_store_kline(
+    std::string_view symbol,
+    quant::event::DataType kline_type,
+    const quant::event::KlineRow& row) {
+    // Cache put is an in-memory operation. Delegate to the sync path
+    // (hot path stays sync). The CoTask wrapper allows callers to
+    // co_await consistently in their coroutine chains.
+    co_return store_kline(symbol, kline_type, row);
+}
+
+CoTask<StoreStatus> StorageEngine::co_store_kline_batch(
+    std::string_view symbol,
+    quant::event::DataType kline_type,
+    const std::vector<quant::event::KlineRow>& rows) {
+    if (rows.empty()) co_return StoreStatus::kInvalidArgument;
+    co_return store_kline_batch(symbol, kline_type, rows);
+}
+
+CoTask<StorageEngine::KlineQueryResult> StorageEngine::co_query_kline(
+    std::string_view symbol,
+    quant::event::DataType kline_type,
+    DataField field,
+    TimeRange range) {
+    KlineQueryResult result;
+    uint8_t dt = static_cast<uint8_t>(kline_type);
+
+    // 1. Query cache (sync — hot path, in-memory)
+    auto cache_blocks = store_->cache().query(symbol, kline_type, field, range);
+    for (const auto& block : cache_blocks) {
+        size_t n = block.row_count();
+        std::vector<double> values(n);
+        size_t decoded = block.decompress(std::span<double>(values));
+        if (decoded > 0) {
+            values.resize(decoded);
+            result.values.insert(result.values.end(),
+                                 values.begin(), values.end());
+        }
+    }
+
+    auto ts_cache = store_->cache().query(symbol, kline_type, DataField::kOpen, range);
+    for (const auto& block : ts_cache) {
+        size_t n = block.row_count();
+        std::vector<int64_t> timestamps(n);
+        size_t decoded = block.decompress(std::span<int64_t>(timestamps));
+        if (decoded > 0) {
+            timestamps.resize(decoded);
+            result.timestamps.insert(result.timestamps.end(),
+                                     timestamps.begin(), timestamps.end());
+        }
+    }
+
+    // 2. Query disk segments via async io_uring reads
+    auto& disk = store_->disk();
+    auto segments = disk.list_segments(symbol, dt);
+    for (const auto& seg : segments) {
+        auto blocks = co_await disk.co_read_segment(seg);
+
+        // Filter blocks matching the requested field and time range
+        for (const auto& block : blocks) {
+            if (block.field() != field) continue;
+            if (block.max_timestamp() < range.begin_ts ||
+                block.min_timestamp() > range.end_ts) continue;
+
+            size_t n = block.row_count();
+            std::vector<double> values(n);
+            size_t decoded = block.decompress(std::span<double>(values));
+            if (decoded > 0) {
+                values.resize(decoded);
+                result.values.insert(result.values.end(),
+                                     values.begin(), values.end());
+            }
+        }
+
+        // Extract timestamps from kOpen blocks in the same segment
+        for (const auto& block : blocks) {
+            if (block.field() != DataField::kOpen) continue;
+            if (block.max_timestamp() < range.begin_ts ||
+                block.min_timestamp() > range.end_ts) continue;
+
+            size_t n = block.row_count();
+            std::vector<int64_t> timestamps(n);
+            size_t decoded = block.decompress(std::span<int64_t>(timestamps));
+            if (decoded > 0) {
+                timestamps.resize(decoded);
+                result.timestamps.insert(result.timestamps.end(),
+                                         timestamps.begin(), timestamps.end());
+            }
+        }
+    }
+
+    co_return result;
+}
+
+CoTask<StoreStatus> StorageEngine::co_flush() {
+    if (closed_) co_return StoreStatus::kStorageFull;
+    store_->disk().flush();
+    co_return StoreStatus::kOk;
 }
 
 }  // namespace quant::storage

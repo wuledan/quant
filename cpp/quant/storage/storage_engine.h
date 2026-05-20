@@ -7,9 +7,14 @@
 #include <vector>
 
 #include "cpp/quant/event/events/kline_event.h"
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/storage/time_series_store.h"
 
+namespace quant::network { class CoIouring; }
+
 namespace quant::storage {
+
+using infra::CoTask;
 
 // ── StorageEngine: unified data storage facade ──
 // Handles kline/tick data storage with compression, caching, and persistence
@@ -57,6 +62,27 @@ public:
 
     // ── Access underlying store ──
     TimeSeriesStore& store() noexcept { return *store_; }
+
+    // ── Coroutine API ──
+    void set_io_uring(quant::network::CoIouring* ring) noexcept;
+
+    CoTask<StoreStatus> co_store_kline(
+        std::string_view symbol,
+        quant::event::DataType kline_type,
+        const quant::event::KlineRow& row);
+
+    CoTask<StoreStatus> co_store_kline_batch(
+        std::string_view symbol,
+        quant::event::DataType kline_type,
+        const std::vector<quant::event::KlineRow>& rows);
+
+    CoTask<KlineQueryResult> co_query_kline(
+        std::string_view symbol,
+        quant::event::DataType kline_type,
+        DataField field,
+        TimeRange range);
+
+    CoTask<StoreStatus> co_flush();
 
 private:
     Options opts_;
