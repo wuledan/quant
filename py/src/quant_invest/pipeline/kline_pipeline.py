@@ -29,6 +29,7 @@ from typing import Any
 
 from ..api.event_bus import EventBusBridge, get_event_bus
 from ..execution.order_adapter import OrderAdapter, OrderResult
+from ..risk.risk_adapter import RiskEngineAdapter, RiskCheckResult
 from ..strategy.factor_engine import FactorEngineBridge, FactorComputeResult
 from ..strategy.dsl import Strategy, SignalContext
 
@@ -44,6 +45,7 @@ class PipelineResult:
     signal_fired: bool = False
     signal_direction: str = ""  # "BUY" / "SELL" / ""
     order_result: OrderResult | None = None
+    risk_result: RiskCheckResult | None = None
     latency_ns: int = 0
 
 
@@ -80,6 +82,9 @@ class KlinePipeline:
         self._order_adapter: OrderAdapter | None = None
         if use_cpp_execution:
             self._init_order_adapter()
+
+        # 风控引擎
+        self._risk_adapter = RiskEngineAdapter()
 
         # 管道统计
         self._stats = _PipelineStats()
@@ -143,7 +148,7 @@ class KlinePipeline:
         self._stats.factor_computes += 1
 
         # 发布因子事件
-        if factor_result.factor_values:
+        if factor_result.factor_values or factor_result.signal_values:
             self._event_bus.publish("factor", {
                 "symbol": symbol,
                 "values": factor_result.factor_values,
@@ -156,6 +161,7 @@ class KlinePipeline:
         signal_fired = False
         signal_direction = ""
         order_result = None
+        risk_result = None
 
         if factor_result.signal_values and hasattr(self._strategy, 'on_signal'):
             # 检查是否有非零信号
@@ -185,8 +191,31 @@ class KlinePipeline:
                     # 处理策略产生的订单
                     if ctx.orders:
                         for order in ctx.orders:
-                            order_result = self._execute_order(order, symbol, price)
-                            self._stats.total_orders += 1
+                            # 风控检查
+                            risk_result = self._risk_adapter.check_order(
+                                symbol=symbol,
+                                side=order.get("side", "BUY"),
+                                price=price,
+                                quantity=order.get("qty", 100),
+                            )
+
+                            # 发布风控事件
+                            self._event_bus.publish("risk", {
+                                "symbol": symbol,
+                                "passed": risk_result.passed,
+                                "risk_level": risk_result.risk_level,
+                                "violations": risk_result.violations,
+                            })
+
+                            if risk_result.passed:
+                                order_result = self._execute_order(order, symbol, price)
+                                self._stats.total_orders += 1
+                            else:
+                                logger.warning(
+                                    "风控拦截: %s %s, violations=%s",
+                                    symbol, order.get("side"), risk_result.violations,
+                                )
+                                self._stats.risk_rejections += 1
 
                     break  # 只处理第一个非零信号
 
@@ -199,6 +228,7 @@ class KlinePipeline:
             signal_fired=signal_fired,
             signal_direction=signal_direction,
             order_result=order_result,
+            risk_result=risk_result,
             latency_ns=elapsed,
         )
 
@@ -266,6 +296,7 @@ class KlinePipeline:
             "total_bars": self._stats.total_bars,
             "factor_computes": self._stats.factor_computes,
             "total_orders": self._stats.total_orders,
+            "risk_rejections": self._stats.risk_rejections,
             "avg_latency_ns": avg_latency,
             "avg_latency_us": avg_latency / 1000,
         }
@@ -283,4 +314,5 @@ class _PipelineStats:
         self.total_bars: int = 0
         self.factor_computes: int = 0
         self.total_orders: int = 0
+        self.risk_rejections: int = 0
         self.total_latency_ns: int = 0
