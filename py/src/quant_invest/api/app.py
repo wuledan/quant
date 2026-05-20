@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import backtest, data, factor, news, portfolio, risk, strategy, system
 from .ws import WebSocketManager
+from .ws_server import WebSocketServer, get_ws_server
+from .event_bus import EventBusBridge, get_event_bus
 from ..data.scheduler import get_scheduler
 from ..backtest.task_manager import get_backtest_manager
 
@@ -40,9 +42,21 @@ async def lifespan(app: FastAPI):
     app.state.backtest_manager = bt_manager
     logger.info("回测任务管理器已启动 (max_workers=2)")
 
+    # 启动 EventBusBridge
+    event_bus = get_event_bus()
+    event_bus.start()
+    app.state.event_bus = event_bus
+    logger.info("EventBusBridge 已启动 (C++ 模式: %s)", event_bus.use_cpp)
+
+    # 启动 WebSocketServer
+    ws_server = get_ws_server()
+    app.state.ws_server = ws_server
+    logger.info("WebSocketServer 已启动")
+
     yield
 
     # Shutdown
+    event_bus.stop()
     bt_manager.shutdown()
     scheduler.stop()
     scheduler_task.cancel()
@@ -85,25 +99,19 @@ def create_app() -> FastAPI:
     app.include_router(system.router, prefix="/api/v1/system", tags=["系统"])
 
     # WebSocket路由
-    @app.websocket("/ws/{channel}")
-    async def websocket_endpoint(websocket: WebSocket, channel: str):
+    @app.websocket("/ws")
+    async def websocket_endpoint(websocket: WebSocket):
         """WebSocket连接端点.
 
-        支持频道:
-        - market: 实时行情推送
-        - portfolio: 持仓变动推送
-        - risk: 风控告警推送
+        客户端通过 JSON 消息控制订阅:
+        - {"action": "subscribe", "channels": ["kline", "signal"]}
+        - {"action": "unsubscribe", "channels": ["kline"]}
+        - {"action": "ping"}
+
+        支持频道: kline, trade, signal, risk, portfolio, system, backtest
         """
-        await ws_manager.connect(channel, websocket)
-        try:
-            while True:
-                data = await websocket.receive_json()
-                if data.get("action") == "subscribe":
-                    await websocket.send_json(
-                        {"type": "subscribed", "channel": channel, "symbols": data.get("symbols", [])}
-                    )
-        except WebSocketDisconnect:
-            await ws_manager.disconnect(channel, websocket)
+        ws_server = app.state.ws_server
+        await ws_server.handle_connection(websocket)
 
     @app.get("/health")
     async def health_check() -> dict:
