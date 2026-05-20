@@ -209,3 +209,106 @@ class MinuteDataHandler(DataHandler):
 
     def history(self, symbol: str, bars: int = 20) -> pd.DataFrame:
         raise NotImplementedError("MinuteDataHandler not yet implemented")
+
+
+class StorageEngineDataHandler(DataHandler):
+    """基于 C++ StorageEngine 的日线数据处理器.
+
+    直接从 StorageEngineAdapter 查询数据，不经过 DataSchedulerService。
+    适用于需要低延迟数据访问的回测场景。
+    """
+
+    def __init__(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+        storage_adapter: object | None = None,
+        data_dir: str = "py/data/daily",
+    ) -> None:
+        self._symbols = symbols
+        self._data: dict[str, pd.DataFrame] = {}
+        self._current_idx: int = 0
+        self._dates: list[pd.Timestamp] = []
+        self._storage_adapter = storage_adapter
+
+        if storage_adapter is None:
+            from ..storage.adapter import StorageEngineAdapter
+            self._storage_adapter = StorageEngineAdapter(data_dir=data_dir)
+
+        self._load_data(start_date, end_date)
+
+    def _load_data(self, start_date: date, end_date: date) -> None:
+        """从 StorageEngine 加载数据."""
+        adapter = self._storage_adapter
+
+        # 预加载所有 Parquet
+        adapter.load_all_cached()
+
+        for symbol in self._symbols:
+            df = adapter.query_kline_as_df(symbol)
+            if df is not None and not df.empty:
+                # 去掉时区
+                if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+                # 按日期范围裁剪
+                mask = pd.Series(True, index=df.index)
+                if start_date:
+                    mask &= df.index >= pd.Timestamp(start_date)
+                if end_date:
+                    mask &= df.index <= pd.Timestamp(end_date)
+                self._data[symbol] = df[mask]
+
+        # 合并统一的时间索引
+        all_dates: set[pd.Timestamp] = set()
+        for df in self._data.values():
+            if not df.empty:
+                all_dates.update(df.index)
+        self._dates = sorted(all_dates) if all_dates else []
+
+    def next_bar(self) -> MarketEvent | None:
+        """获取下一根K线的市场事件."""
+        if self._current_idx >= len(self._dates):
+            return None
+
+        current_date = self._dates[self._current_idx]
+        bar_data: dict[str, dict] = {}
+
+        for symbol in self._symbols:
+            df = self._data.get(symbol, pd.DataFrame())
+            if not df.empty and current_date in df.index:
+                row = df.loc[current_date]
+                bar_data[symbol] = row.to_dict()
+
+        event = MarketEvent(
+            timestamp=current_date.to_pydatetime(),
+            symbol=",".join(self._symbols),
+            bar_data=bar_data,
+        )
+
+        self._current_idx += 1
+        return event
+
+    def current_bar(self, symbol: str) -> dict | None:
+        """获取当前K线数据."""
+        if self._current_idx == 0:
+            return None
+        idx = self._current_idx - 1
+        if idx >= len(self._dates):
+            return None
+        current_date = self._dates[idx]
+        df = self._data.get(symbol, pd.DataFrame())
+        if df.empty or current_date not in df.index:
+            return None
+        return df.loc[current_date].to_dict()
+
+    def history(self, symbol: str, bars: int = 20) -> pd.DataFrame:
+        """获取历史N根K线."""
+        df = self._data.get(symbol, pd.DataFrame())
+        if df.empty or self._current_idx == 0:
+            return pd.DataFrame()
+
+        end_idx = min(self._current_idx, len(self._dates))
+        start_idx = max(0, end_idx - bars)
+        relevant_dates = self._dates[start_idx:end_idx]
+        return df[df.index.isin(relevant_dates)]
