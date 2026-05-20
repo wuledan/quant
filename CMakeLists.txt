@@ -483,3 +483,8 @@ add_test(NAME ir_graph_test COMMAND ir_graph_test)
 add_executable(op_registry_test cpp/test/op_registry_test.cc)
 target_link_libraries(op_registry_test PRIVATE quant_factor GTest::gtest_main)
 add_test(NAME op_registry_test COMMAND op_registry_test)
+
+# ── FactorDAG from_graph test ──
+add_executable(factor_dag_from_graph_test cpp/test/factor_dag_from_graph_test.cc)
+target_link_libraries(factor_dag_from_graph_test PRIVATE quant_factor quant_ir GTest::gtest_main)
+add_test(NAME factor_dag_from_graph_test COMMAND factor_dag_from_graph_test)

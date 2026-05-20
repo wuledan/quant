@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -9,6 +10,8 @@
 #include <vector>
 
 #include "cpp/quant/factor/factor_registry.h"
+
+namespace quant::ir { struct StrategyGraph; }
 
 namespace quant::factor {
 
@@ -52,6 +55,16 @@ public:
 
     // Check if DAG is built
     bool is_built() const noexcept { return built_; }
+
+    // Add a dependency edge (for manual DAG construction)
+    void add_dependency(FactorId dependent, FactorId dependency);
+
+    // ── IR-based construction ──
+    // Build a FactorDAG from an IR StrategyGraph.
+    // Registers nodes via OpRegistry, sets up dependency edges from IR edges.
+    static std::unique_ptr<FactorDAG> from_graph(
+        const quant::ir::StrategyGraph& graph,
+        FactorRegistry& registry);
 
 private:
     // DFS-based topological sort with cycle detection
