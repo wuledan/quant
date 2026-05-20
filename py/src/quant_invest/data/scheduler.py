@@ -39,12 +39,17 @@ DEFAULT_STORAGE_PATH = "./data"
 
 
 class DataSchedulerService:
-    """后台数据调度服务."""
+    """后台数据调度服务.
+
+    支持 C++ StorageEngine 存储模式（use_cpp_storage=True），
+    默认使用 Python 内存缓存 + Parquet（向后兼容）。
+    """
 
     def __init__(
         self,
         symbols: list[str] | None = None,
         storage_path: str = DEFAULT_STORAGE_PATH,
+        use_cpp_storage: bool = False,
     ) -> None:
         self._symbols = symbols or DEFAULT_SYMBOLS
         self._storage_path = Path(storage_path)
@@ -65,11 +70,41 @@ class DataSchedulerService:
         self._daily_cache: dict[str, pd.DataFrame] = {}
         self._daily_cache_time: dict[str, datetime] = {}
 
+        # C++ StorageEngine 存储
+        self._use_cpp_storage = use_cpp_storage
+        self._storage_adapter: Any | None = None
+        if use_cpp_storage:
+            self._init_cpp_storage()
+
         # 调度控制
         self._running = False
         self._tasks: list[asyncio.Task] = []
 
     # ── 公开接口 ──────────────────────────────────────────────
+
+    @property
+    def use_cpp_storage(self) -> bool:
+        """是否使用 C++ StorageEngine 存储."""
+        return self._use_cpp_storage and self._storage_adapter is not None
+
+    def _init_cpp_storage(self) -> None:
+        """初始化 C++ StorageEngine 存储模式."""
+        try:
+            from ..storage.adapter import StorageEngineAdapter
+
+            self._storage_adapter = StorageEngineAdapter(
+                data_dir=str(self._storage_path / "daily"),
+            )
+            # 预加载已有 Parquet 数据
+            results = self._storage_adapter.load_all_cached()
+            logger.info(
+                "C++ StorageEngine 已启用, 预加载 %d 个标的",
+                len(results),
+            )
+        except Exception as e:
+            logger.warning("C++ StorageEngine 初始化失败: %s，回退到 Python", e)
+            self._use_cpp_storage = False
+            self._storage_adapter = None
 
     def start(self) -> None:
         """启动调度."""
@@ -131,8 +166,25 @@ class DataSchedulerService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> pd.DataFrame:
-        """从本地缓存/Parquet获取日线数据."""
-        # 1. 优先查内存缓存
+        """从本地缓存/StorageEngine/Parquet获取日线数据.
+
+        C++ 模式下优先从 StorageEngineAdapter 查询；
+        Python 模式下从内存缓存 → Parquet → 实时拉取。
+        """
+        # C++ StorageEngine 模式
+        if self._storage_adapter is not None:
+            df = self._storage_adapter.query_kline_as_df(symbol)
+            if df is not None and not df.empty:
+                if start_date or end_date:
+                    mask = pd.Series(True, index=df.index)
+                    if start_date:
+                        mask &= df.index >= pd.Timestamp(start_date)
+                    if end_date:
+                        mask &= df.index <= pd.Timestamp(end_date)
+                    return df[mask]
+                return df
+
+        # Python 模式: 优先查内存缓存
         df = self._daily_cache.get(symbol)
         if df is not None and not df.empty:
             if start_date or end_date:
@@ -144,11 +196,13 @@ class DataSchedulerService:
                 return df[mask]
             return df
 
-        # 2. 从Parquet加载
+        # 从Parquet加载
         df = self._load_parquet(symbol)
         if df is not None and not df.empty:
             self._daily_cache[symbol] = df
             self._daily_cache_time[symbol] = datetime.now()
+            # 写入 StorageEngine
+            self._store_to_cpp(symbol, df)
             if start_date or end_date:
                 mask = pd.Series(True, index=df.index)
                 if start_date:
@@ -158,7 +212,7 @@ class DataSchedulerService:
                 return df[mask]
             return df
 
-        # 3. 实时拉取
+        # 实时拉取
         return self._fetch_and_cache(symbol, start_date, end_date)
 
     def get_news(self, count: int = 50) -> list[dict[str, Any]]:
@@ -172,6 +226,7 @@ class DataSchedulerService:
             "symbols": self._symbols,
             "daily_cache_count": len(self._daily_cache),
             "news_cache_count": len(self._news_cache),
+            "cpp_storage": self.use_cpp_storage,
             "news_last_update": self._news_last_update.isoformat() if self._news_last_update else None,
             "daily_cache_times": {
                 s: t.isoformat() for s, t in self._daily_cache_time.items()
@@ -197,6 +252,7 @@ class DataSchedulerService:
                 if not df.empty:
                     self._daily_cache[symbol] = df
                     self._daily_cache_time[symbol] = datetime.now()
+                    self._store_to_cpp(symbol, df)
                     logger.info("日线数据更新: %s, %d条记录", symbol, len(df))
                 else:
                     logger.warning("日线数据为空: %s", symbol)
@@ -225,6 +281,7 @@ class DataSchedulerService:
                 if not df.empty:
                     self._daily_cache[symbol] = df
                     self._daily_cache_time[symbol] = datetime.now()
+                    self._store_to_cpp(symbol, df)
                     logger.debug("增量更新: %s, 最新日期=%s", symbol, df.index[-1].strftime("%Y-%m-%d"))
 
             except Exception as e:
@@ -289,6 +346,17 @@ class DataSchedulerService:
         except Exception as e:
             logger.error("实时拉取失败 %s: %s", symbol, e)
             return pd.DataFrame()
+
+    def _store_to_cpp(self, symbol: str, df: pd.DataFrame) -> None:
+        """将 DataFrame 写入 C++ StorageEngine（如果可用）."""
+        if self._storage_adapter is None:
+            return
+        try:
+            count = self._storage_adapter._store_dataframe(symbol, df)
+            if count > 0:
+                logger.debug("StorageEngine 写入 %s: %d 行", symbol, count)
+        except Exception as e:
+            logger.warning("StorageEngine 写入 %s 失败: %s", symbol, e)
 
 
 # ── 全局单例 ──────────────────────────────────────────────
