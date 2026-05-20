@@ -167,7 +167,9 @@ void bind_storage(py::module_& m) {
 
     // ── TimeSeriesStore ──
     py::class_<TimeSeriesStore>(m, "TimeSeriesStore")
-        .def(py::init<size_t, std::filesystem::path>(),
+        .def(py::init([](size_t cache_budget_mb, const std::string& data_dir) {
+                 return new TimeSeriesStore(cache_budget_mb, std::filesystem::path(data_dir));
+             }),
              py::arg("cache_budget_mb"), py::arg("data_dir"))
         .def("put", &TimeSeriesStore::put,
              py::arg("symbol"), py::arg("data_type"), py::arg("block"))
@@ -180,6 +182,14 @@ void bind_storage(py::module_& m) {
              py::arg("symbol"), py::arg("data_type"), py::arg("field"))
         .def("flush", &TimeSeriesStore::flush)
         .def("close", &TimeSeriesStore::close);
+
+    // ── KlineQueryResult (must be before StorageEngine) ──
+    py::class_<StorageEngine::KlineQueryResult>(m, "KlineQueryResult")
+        .def_readonly("timestamps", &StorageEngine::KlineQueryResult::timestamps)
+        .def_readonly("values", &StorageEngine::KlineQueryResult::values)
+        .def("row_count", [](const StorageEngine::KlineQueryResult& r) {
+            return r.timestamps.size();
+        });
 
     // ── StorageEngine ──
     py::class_<StorageEngine>(m, "StorageEngine")
