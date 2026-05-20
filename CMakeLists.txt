@@ -208,6 +208,7 @@ add_library(quant_factor
     cpp/quant/factor/factor_dag.cc
     cpp/quant/factor/factor_computer.cc
     cpp/quant/factor/built_in_factors.cc
+    cpp/quant/factor/op_registry.cc
 )
 target_include_directories(quant_factor PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_factor PUBLIC quant_infra)
@@ -477,3 +478,8 @@ endif()
 add_executable(ir_graph_test cpp/test/ir_graph_test.cc)
 target_link_libraries(ir_graph_test PRIVATE quant_ir GTest::gtest_main)
 add_test(NAME ir_graph_test COMMAND ir_graph_test)
+
+# ── OpRegistry test ──
+add_executable(op_registry_test cpp/test/op_registry_test.cc)
+target_link_libraries(op_registry_test PRIVATE quant_factor GTest::gtest_main)
+add_test(NAME op_registry_test COMMAND op_registry_test)
