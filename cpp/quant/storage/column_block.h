@@ -11,6 +11,7 @@
 namespace quant::storage {
 
 enum class DataField : uint8_t {
+    kTimestamp = 255,  // special field for timestamp column
     kOpen   = 0,
     kHigh   = 1,
     kLow    = 2,
@@ -27,6 +28,7 @@ enum class DataField : uint8_t {
 
 constexpr std::string_view data_field_name(DataField f) noexcept {
     switch (f) {
+        case DataField::kTimestamp: return "timestamp";
         case DataField::kOpen:   return "open";
         case DataField::kHigh:   return "high";
         case DataField::kLow:    return "low";

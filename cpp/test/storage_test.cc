@@ -596,12 +596,54 @@ TEST(StorageEngineTest, StoreAndQueryKline) {
     auto status = engine.store_kline_batch("QUERY", quant::event::DataType::kKline1Min, rows);
     EXPECT_EQ(status, StoreStatus::kOk);
 
-    // Query opens
+    // Query opens (price field → Gorilla/double)
     auto result = engine.query_kline("QUERY", quant::event::DataType::kKline1Min,
                                       DataField::kOpen,
                                       TimeRange{0, 99999});
-    // Should get some results (from cache)
-    EXPECT_GT(result.values.size(), 0u);
+    ASSERT_EQ(result.values.size(), 5u);
+    for (int i = 0; i < 5; ++i) {
+        double expected = static_cast<double>(rows[i].open_price) / 10000.0;
+        EXPECT_DOUBLE_EQ(result.values[i], expected);
+    }
+
+    // Query volumes (integer field → Delta/int64)
+    auto vol_result = engine.query_kline("QUERY", quant::event::DataType::kKline1Min,
+                                          DataField::kVolume,
+                                          TimeRange{0, 99999});
+    ASSERT_EQ(vol_result.values.size(), 5u);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_DOUBLE_EQ(vol_result.values[i], static_cast<double>(rows[i].volume));
+    }
+
+    // Query timestamps
+    EXPECT_EQ(result.timestamps.size(), 5u);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_EQ(result.timestamps[i], rows[i].timestamp);
+    }
+}
+
+TEST(StorageEngineTest, StoreAndQueryKlineSingle) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{4, tmpdir.path()});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1700000000000000LL;
+    row.open_price = 10000;
+    row.high_price = 10500;
+    row.low_price = 9800;
+    row.close_price = 10300;
+    row.volume = 1000000;
+    row.amount = 103000000LL;
+    row.vwap = 102500;
+
+    auto status = engine.store_kline("SINGLE", quant::event::DataType::kKline1Min, row);
+    EXPECT_EQ(status, StoreStatus::kOk);
+
+    auto result = engine.query_kline("SINGLE", quant::event::DataType::kKline1Min,
+                                      DataField::kClose,
+                                      TimeRange{0, 9999999999999999LL});
+    ASSERT_EQ(result.values.size(), 1u);
+    EXPECT_DOUBLE_EQ(result.values[0], 1.03);
 }
 
 TEST(StorageEngineTest, FlushAndClose) {

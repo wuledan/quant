@@ -22,7 +22,24 @@ StoreStatus StorageEngine::store_kline(
     const quant::event::KlineRow& row) {
     uint8_t dt = static_cast<uint8_t>(kline_type);
 
-    // Store each field as a single-element column block
+    // Timestamp: Delta codec with int64
+    int64_t ts_arr[1] = {row.timestamp};
+    ColumnBlock ts_block = ColumnBlock::compress(
+        DataField::kTimestamp, {ts_arr, 1},
+        ColumnBlock::Codec::kDelta, row.timestamp, row.timestamp);
+    store_->put(symbol, dt, std::move(ts_block));
+
+    // Price fields: Gorilla codec with double (int32 price / 10000.0)
+    auto store_price = [&](DataField field, int32_t price_int) {
+        double val = static_cast<double>(price_int) / 10000.0;
+        double arr[1] = {val};
+        ColumnBlock block = ColumnBlock::compress(
+            field, {arr, 1},
+            ColumnBlock::Codec::kGorilla, row.timestamp, row.timestamp);
+        store_->put(symbol, dt, std::move(block));
+    };
+
+    // Integer fields: Delta codec with int64
     auto store_scalar = [&](DataField field, int64_t val) {
         int64_t arr[1] = {val};
         ColumnBlock block = ColumnBlock::compress(
@@ -31,10 +48,10 @@ StoreStatus StorageEngine::store_kline(
         store_->put(symbol, dt, std::move(block));
     };
 
-    store_scalar(DataField::kOpen, row.open_price);
-    store_scalar(DataField::kHigh, row.high_price);
-    store_scalar(DataField::kLow, row.low_price);
-    store_scalar(DataField::kClose, row.close_price);
+    store_price(DataField::kOpen, row.open_price);
+    store_price(DataField::kHigh, row.high_price);
+    store_price(DataField::kLow, row.low_price);
+    store_price(DataField::kClose, row.close_price);
     store_scalar(DataField::kVolume, row.volume);
     store_scalar(DataField::kAmount, row.amount);
     store_scalar(DataField::kVwap, row.vwap);
@@ -52,7 +69,7 @@ StoreStatus StorageEngine::store_kline_batch(
 
     // Collect per-field arrays
     std::vector<int64_t> timestamps;
-    std::vector<int64_t> opens, highs, lows, closes;
+    std::vector<double> opens, highs, lows, closes;
     std::vector<int64_t> volumes, amounts, vwaps;
 
     timestamps.reserve(rows.size());
@@ -67,10 +84,10 @@ StoreStatus StorageEngine::store_kline_batch(
     int64_t min_ts = INT64_MAX, max_ts = INT64_MIN;
     for (const auto& row : rows) {
         timestamps.push_back(row.timestamp);
-        opens.push_back(row.open_price);
-        highs.push_back(row.high_price);
-        lows.push_back(row.low_price);
-        closes.push_back(row.close_price);
+        opens.push_back(static_cast<double>(row.open_price) / 10000.0);
+        highs.push_back(static_cast<double>(row.high_price) / 10000.0);
+        lows.push_back(static_cast<double>(row.low_price) / 10000.0);
+        closes.push_back(static_cast<double>(row.close_price) / 10000.0);
         volumes.push_back(row.volume);
         amounts.push_back(row.amount);
         vwaps.push_back(row.vwap);
@@ -78,8 +95,20 @@ StoreStatus StorageEngine::store_kline_batch(
         max_ts = std::max(max_ts, row.timestamp);
     }
 
-    // Compress and store each field as compressed blocks of kBlockSize
-    auto store_field = [&](DataField field, const std::vector<int64_t>& values) {
+    // Price fields: Gorilla codec with double
+    auto store_price_field = [&](DataField field, const std::vector<double>& values) {
+        for (size_t i = 0; i < values.size(); i += ColumnBlock::kBlockSize) {
+            size_t end = std::min(i + ColumnBlock::kBlockSize, values.size());
+            auto block = ColumnBlock::compress(
+                field, {values.data() + i, end - i},
+                ColumnBlock::Codec::kGorilla,
+                timestamps[i], timestamps[end - 1]);
+            store_->put(symbol, dt, std::move(block));
+        }
+    };
+
+    // Integer fields: Delta codec with int64
+    auto store_int_field = [&](DataField field, const std::vector<int64_t>& values) {
         for (size_t i = 0; i < values.size(); i += ColumnBlock::kBlockSize) {
             size_t end = std::min(i + ColumnBlock::kBlockSize, values.size());
             auto block = ColumnBlock::compress(
@@ -90,13 +119,16 @@ StoreStatus StorageEngine::store_kline_batch(
         }
     };
 
-    store_field(DataField::kOpen, opens);
-    store_field(DataField::kHigh, highs);
-    store_field(DataField::kLow, lows);
-    store_field(DataField::kClose, closes);
-    store_field(DataField::kVolume, volumes);
-    store_field(DataField::kAmount, amounts);
-    store_field(DataField::kVwap, vwaps);
+    store_price_field(DataField::kOpen, opens);
+    store_price_field(DataField::kHigh, highs);
+    store_price_field(DataField::kLow, lows);
+    store_price_field(DataField::kClose, closes);
+    store_int_field(DataField::kVolume, volumes);
+    store_int_field(DataField::kAmount, amounts);
+    store_int_field(DataField::kVwap, vwaps);
+
+    // Timestamps: Delta codec with int64
+    store_int_field(DataField::kTimestamp, timestamps);
 
     return StoreStatus::kOk;
 }
@@ -111,20 +143,35 @@ StorageEngine::KlineQueryResult StorageEngine::query_kline(
     uint8_t dt = static_cast<uint8_t>(kline_type);
     auto blocks = store_->query(symbol, dt, field, range);
 
+    bool is_price_field = (field == DataField::kOpen ||
+                           field == DataField::kHigh ||
+                           field == DataField::kLow ||
+                           field == DataField::kClose);
+
     // Decompress all blocks
     for (const auto& block : blocks) {
         size_t n = block.row_count();
-        std::vector<double> values(n);
-        size_t decoded = block.decompress(std::span<double>(values));
-        if (decoded > 0) {
-            values.resize(decoded);
-            result.values.insert(result.values.end(),
-                                 values.begin(), values.end());
+        if (is_price_field) {
+            std::vector<double> values(n);
+            size_t decoded = block.decompress(std::span<double>(values));
+            if (decoded > 0) {
+                values.resize(decoded);
+                result.values.insert(result.values.end(),
+                                     values.begin(), values.end());
+            }
+        } else {
+            std::vector<int64_t> values(n);
+            size_t decoded = block.decompress(std::span<int64_t>(values));
+            if (decoded > 0) {
+                values.resize(decoded);
+                result.values.insert(result.values.end(),
+                                     values.begin(), values.end());
+            }
         }
     }
 
-    // Query timestamp blocks for the same time range
-    auto ts_blocks = store_->query(symbol, dt, DataField::kOpen, range);
+    // Query timestamp column
+    auto ts_blocks = store_->query(symbol, dt, DataField::kTimestamp, range);
     for (const auto& block : ts_blocks) {
         size_t n = block.row_count();
         std::vector<int64_t> timestamps(n);
@@ -181,20 +228,35 @@ CoTask<StorageEngine::KlineQueryResult> StorageEngine::co_query_kline(
     KlineQueryResult result;
     uint8_t dt = static_cast<uint8_t>(kline_type);
 
+    bool is_price_field = (field == DataField::kOpen ||
+                           field == DataField::kHigh ||
+                           field == DataField::kLow ||
+                           field == DataField::kClose);
+
     // 1. Query cache (sync — hot path, in-memory)
     auto cache_blocks = store_->cache().query(symbol, kline_type, field, range);
     for (const auto& block : cache_blocks) {
         size_t n = block.row_count();
-        std::vector<double> values(n);
-        size_t decoded = block.decompress(std::span<double>(values));
-        if (decoded > 0) {
-            values.resize(decoded);
-            result.values.insert(result.values.end(),
-                                 values.begin(), values.end());
+        if (is_price_field) {
+            std::vector<double> values(n);
+            size_t decoded = block.decompress(std::span<double>(values));
+            if (decoded > 0) {
+                values.resize(decoded);
+                result.values.insert(result.values.end(),
+                                     values.begin(), values.end());
+            }
+        } else {
+            std::vector<int64_t> values(n);
+            size_t decoded = block.decompress(std::span<int64_t>(values));
+            if (decoded > 0) {
+                values.resize(decoded);
+                result.values.insert(result.values.end(),
+                                     values.begin(), values.end());
+            }
         }
     }
 
-    auto ts_cache = store_->cache().query(symbol, kline_type, DataField::kOpen, range);
+    auto ts_cache = store_->cache().query(symbol, kline_type, DataField::kTimestamp, range);
     for (const auto& block : ts_cache) {
         size_t n = block.row_count();
         std::vector<int64_t> timestamps(n);
@@ -219,18 +281,28 @@ CoTask<StorageEngine::KlineQueryResult> StorageEngine::co_query_kline(
                 block.min_timestamp() > range.end_ts) continue;
 
             size_t n = block.row_count();
-            std::vector<double> values(n);
-            size_t decoded = block.decompress(std::span<double>(values));
-            if (decoded > 0) {
-                values.resize(decoded);
-                result.values.insert(result.values.end(),
-                                     values.begin(), values.end());
+            if (is_price_field) {
+                std::vector<double> values(n);
+                size_t decoded = block.decompress(std::span<double>(values));
+                if (decoded > 0) {
+                    values.resize(decoded);
+                    result.values.insert(result.values.end(),
+                                         values.begin(), values.end());
+                }
+            } else {
+                std::vector<int64_t> values(n);
+                size_t decoded = block.decompress(std::span<int64_t>(values));
+                if (decoded > 0) {
+                    values.resize(decoded);
+                    result.values.insert(result.values.end(),
+                                         values.begin(), values.end());
+                }
             }
         }
 
-        // Extract timestamps from kOpen blocks in the same segment
+        // Extract timestamps from kTimestamp blocks in the same segment
         for (const auto& block : blocks) {
-            if (block.field() != DataField::kOpen) continue;
+            if (block.field() != DataField::kTimestamp) continue;
             if (block.max_timestamp() < range.begin_ts ||
                 block.min_timestamp() > range.end_ts) continue;
 

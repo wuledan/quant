@@ -1,8 +1,9 @@
-# 架构重设计：C++ 常驻引擎 + Python 策略热加载
+# 架构重设计：C++ 常驻引擎 + Python 策略编译
 
-> 日期: 2026-05-20
+> 日期: 2026-05-20 (更新)
 > 状态: 设计阶段
 > 前置文档: architecture_cpp_core.md, architecture_python.md
+> 讨论记录: discussion_2026_05_20.md
 
 ## 1. 背景与问题
 
@@ -33,37 +34,61 @@ C++ 引擎 (pybind11 _quant_core)
 | C++ 引擎闲置 | StorageEngine/EventBus/FactorDAG/OrderManager 全部已实现但未接入 | 性能浪费 |
 | 数据不在引擎里 | 散落在 Parquet + Python 内存缓存, C++ StorageEngine 空转 | 查询慢, 无法零拷贝 |
 | 单进程模型 | Python 单进程承担所有职责 | 无法利用多核, GC 停顿影响实时性 |
+| **Python 驱动 C++** | **pybind11 让 Python 做主循环, C++ 只是被调库** | **C++ 引擎无法自主运行, Python 成为性能瓶颈** |
+
+### 1.3 架构方向变更 (2026-05-20)
+
+**原方案**: Python 主进程 + pybind11 调用 C++ 引擎
+**新方案**: Python 只负责策略编写和编译，产出 IR（图拓扑描述），C++ 后端加载 IR → 构图 → 执行
+
+**用户原话**: "这不是我所期望的结构，考虑更换实现，我所预期的方式是，python 生成的策略计算图，经过编译后,可能是一个c++代码，或者是一段protobuf类似的图拓补描述，后端引擎加载相应编译后产出-> 构图-> 执行"
 
 ## 2. 目标架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   C++ 后端服务 (常驻进程)                  │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
-│  │Storage   │  │EventBus  │  │Scheduler │  │WebSocket│ │
-│  │Engine    │  │          │  │Service   │  │Server   │ │
-│  │          │  │ Kline ──→│  │ cron+dag │  │ :8080   │ │
-│  │ store()  │  │ Factor──→│  │          │  │         │ │
-│  │ query()  │  │ Signal──→│  │          │  │ push    │ │
-│  │ flush()  │  │ Order───→│  │          │  │         │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘ │
-│       │              │              │              │      │
-│       └──────────────┴──────────────┴──────────────┘      │
-│                        pybind11                           │
-└────────────────────────┬────────────────────────────────┘
-                         │ import _quant_core
-┌────────────────────────┴────────────────────────────────┐
-│                  Python 策略层 (热加载)                    │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-│  │策略脚本   │  │策略编译器 │  │回测/交易  │              │
-│  │.py 文件  │  │→ DAG 图  │  │runner    │              │
-│  └──────────┘  └──────────┘  └──────────┘              │
-│                                                          │
-│  策略文件修改 → 自动重载 → 编译为执行图 → 提交到C++引擎    │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   C++ 后端服务 (常驻进程)                       │
+│                                                               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐     │
+│  │Storage   │  │EventBus  │  │Scheduler │  │WebSocket│     │
+│  │Engine    │  │          │  │Service   │  │Server   │     │
+│  │          │  │ Kline ──→│  │ cron+dag │  │ :8080   │     │
+│  │ store()  │  │ Factor──→│  │          │  │         │     │
+│  │ query()  │  │ Signal──→│  │          │  │ push    │     │
+│  │ flush()  │  │ Order───→│  │          │  │         │     │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘     │
+│       │              │              │              │          │
+│  ┌────┴──────────────┴──────────────┴──────────────┴────┐   │
+│  │              IR Loader + FactorDAG Builder            │   │
+│  │  load(IR) → NodeDef → FactorRegistry → FactorDAG     │   │
+│  │  → FactorComputer.compute() → 结果                    │   │
+│  └───────────────────────────────────────────────────────┘   │
+│                        ^ 加载编译产物                          │
+└────────────────────────┼────────────────────────────────────┘
+                         │ .graph (IR 文件)
+┌────────────────────────┴────────────────────────────────────┐
+│              Python 策略开发 + 编译 (离线工具)                  │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│  │策略脚本   │  │策略编译器 │  │IR 输出    │                  │
+│  │.py DSL   │→ │AST→IR    │→ │.graph    │                  │
+│  │typed I/O │  │类型推断   │  │protobuf  │                  │
+│  └──────────┘  └──────────┘  └──────────┘                  │
+│                                                              │
+│  Python 只负责编写和编译，不参与运行时计算                        │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### 关键变化：Python 不再驱动 C++
+
+| 维度 | 旧方案 | 新方案 |
+|------|--------|--------|
+| 运行时 Python 角色 | 主循环，通过 pybind11 调 C++ | 不参与，仅编译期使用 |
+| 策略执行 | Python on_bar → C++ 因子 | C++ 加载 IR → 构图 → 自主执行 |
+| 因子计算 | Python rolling / C++ fallback | C++ FactorDAG 全部执行 |
+| 信号生成 | Python strategy.on_signal() | IR 中定义信号节点，C++ 执行 |
+| 策略热加载 | Python watchfiles → 重新 import | 编译新 IR → C++ 热加载 .graph |
+| 数据流 | Python 拉数据 → C++ 存储 | C++ DataIngestor → StorageEngine |
 
 ## 3. 组件设计
 
@@ -96,24 +121,25 @@ result = engine.query_kline(symbol, kline_type, field, time_range)  # 查询
 # result.values: numpy float64 array (零拷贝)
 ```
 
-### 3.2 Python 策略热加载 + DAG 编译
+### 3.2 Python 策略编译 → IR → C++ 加载执行
 
-**职责**: 策略快速迭代, 声明式定义, 编译为 C++ DAG
+**职责**: Python 编写策略 → 编译为图拓扑 IR → C++ 后端加载执行
 
 **策略开发流程**:
 ```
-编辑 ma_cross.py → 保存 → 文件监视器检测变更 → 编译为执行图 → 注册到引擎
+编辑 ma_cross.py → 保存 → 编译器提取节点定义 → 类型推断 → 生成 .graph IR → C++ 后端热加载
 ```
 
-**策略声明式定义**:
+**策略声明式定义 (typed I/O)**:
 ```python
 from quant_invest.strategy import Strategy, Factor, cross_above
 
 @strategy("ma_cross")
 class MACross:
-    fast_ma = Factor("SMA", period=5, input="close")
-    slow_ma = Factor("SMA", period=20, input="close")
-    signal = cross_above(fast_ma, slow_ma)
+    # 每个节点有明确的输入/输出类型定义
+    fast_ma = Factor("SMA", period=5, input="close")   # output: TimeSeries[float]
+    slow_ma = Factor("SMA", period=20, input="close")  # output: TimeSeries[float]
+    signal = cross_above(fast_ma, slow_ma)             # input: 2×TimeSeries[float], output: Signal
 
     def on_signal(self, ctx):
         if self.signal > 0:
@@ -122,27 +148,59 @@ class MACross:
             ctx.order(symbol=ctx.symbol, side=SELL, quantity=ctx.position)
 ```
 
-**编译结果**:
-- 因子节点注册到 C++ `FactorRegistry` → `FactorDAG.build()` 自动拓扑排序
-- 信号节点注册到 EventBus 订阅
-- 策略修改只影响自己的 DAG 子图, 不影响其他策略
+**编译产出 (IR)**:
+```protobuf
+message StrategyGraph {
+  repeated NodeDef nodes = 1;
+  repeated EdgeDef edges = 2;    // 自动推断 + 显式覆盖
+  repeated ParamBinding params = 3;
+}
 
-### 3.3 回测引擎 (走 StorageEngine + FactorDAG)
+message NodeDef {
+  string name = 1;
+  string op_type = 2;            // "SMA", "CROSS_ABOVE", "THRESHOLD"
+  map<string, TypeSpec> inputs = 3;
+  map<string, TypeSpec> outputs = 4;
+  map<string, ParamValue> params = 5;
+}
+
+message EdgeDef {
+  string source_node = 1;
+  string source_output = 2;
+  string target_node = 3;
+  string target_input = 4;
+}
+```
+
+**C++ 后端加载**:
+```cpp
+auto graph = StrategyGraph::load_from_file("ma_cross.graph");
+auto dag = FactorDAG::from_graph(graph);  // 根据 NodeDef + EdgeDef 构图
+dag.compute(store, time_range);            // 执行
+```
+
+**图连接推断**:
+- 节点 A 输出 `value: TimeSeries[float]`
+- 节点 B 输入 `price: TimeSeries[float]`
+- 类型匹配 → 自动连接 A.value → B.price
+- 同类型多输出时，用显式名称匹配
+
+### 3.3 回测引擎 (C++ 全链路执行)
 
 **职责**: 高性能回测, 数据零拷贝, 因子 C++ 并行计算
 
 **数据流**:
 ```
 StorageEngine.query_kline() → numpy array (零拷贝)
-  → FactorDAG.compute() → 因子值 (C++ 并行)
-  → Python strategy.on_signal() → 信号
+  → IR Loader → FactorDAG.compute() → 因子值 (C++ 并行)
+  → SignalNode.evaluate() → 信号 (C++ 执行)
   → C++ SimulatedBroker.execute() → 成交
   → Portfolio.update() → 净值
 ```
 
 **对比当前**:
 - 当前: Python 拉数据 → Python rolling → Python on_bar → Python broker
-- 目标: C++ 读数据 → C++ 因子 → Python 信号 → C++ 订单
+- 目标: C++ 读数据 → C++ 因子 → C++ 信号 → C++ 订单
 
 ### 3.4 实时推送 (C++ WebSocketServer)
 
@@ -161,42 +219,44 @@ StorageEngine.query_kline() → numpy array (零拷贝)
 | 数据存储 | Python Parquet + 内存 dict | C++ StorageEngine 列存 + LRU 缓存 |
 | 数据采集 | Python asyncio 定时拉 | C++ SchedulerService 协程 + io_uring |
 | 因子计算 | Python rolling | C++ FactorDAG 拓扑并行 |
-| 策略执行 | Python on_bar 循环 | Python 信号生成 + C++ 订单管理 |
-| 策略迭代 | 改代码 → 重启 | 改代码 → 自动重载 → DAG 增量更新 |
+| 策略执行 | Python on_bar 循环 | C++ IR 加载 → FactorDAG 自主执行 |
+| 策略迭代 | 改代码 → 重启 | 改代码 → 编译 IR → C++ 热加载 |
 | 回测数据 | 每次拉网/读 Parquet | 直接读 StorageEngine 零拷贝 |
 | 实时推送 | FastAPI WS | C++ WebSocketServer io_uring |
-| 进程模型 | Python 单进程 | C++ 常驻 + Python 策略热加载 |
+| 进程模型 | Python 单进程 | C++ 常驻 + Python 仅编译期 |
+| Python 角色 | 运行时主循环 | 编译期工具，不参与运行时 |
 
 ## 5. 实施路径
 
-### P0: C++ StorageEngine 接入数据采集
-- 编译 pybind11 模块, 确保 `_quant_core` 可 import
-- 实现 DataIngestor: C++ 协程定时拉取 → store_kline_batch()
-- Python 调度器改为调用 C++ StorageEngine, 替代 Parquet 缓存
-- 验证: query_kline 返回正确数据
+### P0: C++ 常驻服务 + StorageEngine 接入
+- 修复 StorageEngine codec bug (#142)
+- 实现 C++ 常驻服务 main() (#144)
+- 实现 DataIngestor 网络协程 (#145)
+- 验证: C++ 进程常驻运行，数据自动采集写入 StorageEngine
 
-### P1: Python 策略热加载 + DAG 编译器
-- 实现文件监视器 (watchfiles)
-- 策略声明式 DSL: Factor / cross_above / cross_below
-- 策略编译器: Python AST → FactorDAG 节点注册
-- 策略热重载: 检测变更 → 增量更新 DAG → 不影响运行中的策略
-- 验证: 修改策略文件 → 自动生效, 无需重启
+### P1: Python DSL → IR 编译器
+- 设计 IR schema (Protobuf/FlatBuffers/JSON)
+- 重写 Python DSL v2: typed input/output 节点定义
+- 实现类型推断和连接匹配算法
+- 实现 Python → IR 编译器
+- 验证: Python 策略 → 编译输出 .graph IR 文件
 
-### P2: 回测走 StorageEngine + FactorDAG
-- BacktestRunner: 从 StorageEngine 读数据 (零拷贝)
-- 因子计算走 C++ FactorDAG (并行)
-- 策略信号生成走 Python
-- 订单模拟走 C++ SimulatedBroker
-- 验证: 回测结果与当前 Python 引擎一致, 速度提升
+### P2: C++ IR 加载器 + FactorDAG 执行
+- 实现 C++ IR Loader: .graph → NodeDef → FactorRegistry 查找
+- 实现 FactorDAG::from_graph() 工厂方法
+- 实现 C++ 信号节点执行
+- 回测全链路走 C++ (StorageEngine → FactorDAG → Signal → Order)
+- 验证: C++ 加载 IR → 构图 → 执行回测
 
-### P3: C++ WebSocketServer 替代 FastAPI WS
-- 启动 WebSocketServer :8080
-- EventBus 订阅 → broadcast 到前端
-- 前端连接切换到 :8080
-- 验证: 实时数据推送延迟 < 10ms
+### P3: 策略中心 + 前端闭环
+- 策略注册中心 SQLite (#143)
+- 策略提交注册 API (#147)
+- 前端策略选择 + 回测触发 + 结果展示 (#146)
+- 验证: 前端提交策略 → 编译 → 注册 → 触发回测 → 查看结果
 
-### P4: 交易时段 EventBus 全链路打通
-- KlineEvent → FactorDAG → FactorUpdateEvent → Strategy → SignalEvent → OrderManager
+### P4: 实时交易链路
+- C++ WebSocketServer 替代 FastAPI WS
+- EventBus 全链路: Kline → Factor → Signal → Risk → Order
 - 风控: RiskEngine 检查订单 → RiskAlertEvent
 - 验证: 端到端延迟 < 1ms (同进程内)
 
@@ -204,20 +264,23 @@ StorageEngine.query_kline() → numpy array (零拷贝)
 
 | Agent | 方向 | 负责组件 |
 |-------|------|----------|
-| storage-engine-expert | C++ 存储引擎 | P0: StorageEngine 接入, DataIngestor, pybind 绑定 |
-| storage-engine-expert | C++ 存储引擎 | P3: WebSocketServer 接入, EventBus 推送 |
-| go-backend-expert | 后端架构 | P1: 策略热加载框架, DAG 编译器, 文件监视器 |
-| go-backend-expert | 后端架构 | P2: 回测 Runner 重构, StorageEngine 数据源 |
-| backend-testing-expert | 后端测试 | 各组件单元测试, 集成测试, 性能基准测试 |
+| storage-engine-expert | C++ 存储引擎 | P0: StorageEngine codec 修复, DataIngestor 网络协程 |
+| storage-engine-expert | C++ 存储引擎 | P2: IR Loader, FactorDAG::from_graph() |
+| go-backend-expert | 后端架构 | P0: C++ 常驻服务进程 |
+| go-backend-expert | 后端架构 | P1: Python DSL v2, IR 编译器 |
+| frontend-expert | 前端 | P3: 策略选择 + 回测触发 + 结果展示 |
+| backend-testing-expert | 后端测试 | 各阶段单元测试, 集成测试, 性能基准测试 |
 | 总架构师 | 架构协调 | 任务分配, Review, 推送, 架构文档更新 |
 
 ## 7. 验收标准
 
-- [ ] C++ StorageEngine 可通过 pybind11 存取 K 线数据
-- [ ] 数据采集写入 StorageEngine, 非 Python Parquet
-- [ ] 策略文件修改后 5 秒内自动生效
-- [ ] 回测从 StorageEngine 读数据, 无网络 IO
-- [ ] 前端通过 C++ WebSocket 接收实时推送
-- [ ] 交易时段全链路 EventBus 打通
-- [ ] 所有组件有单元测试, 集成测试通过
-- [ ] 架构文档更新, 记录变迁
+- [ ] StorageEngine codec bug 修复，store_kline/query_kline 数据一致
+- [ ] C++ 常驻服务进程可启动，StorageEngine + EventBus + Scheduler 运行正常
+- [ ] DataIngestor 网络协程可连接数据源、接收数据、写入 StorageEngine
+- [ ] Python DSL v2 支持 typed input/output 节点定义
+- [ ] Python → IR 编译器可输出 .graph 文件
+- [ ] C++ IR Loader 可加载 .graph → 构造 FactorDAG → 执行
+- [ ] 回测全链路走 C++，无需 Python 运行时参与
+- [ ] 策略注册中心 SQLite CRUD 可用
+- [ ] 前端可提交策略 → 触发回测 → 查看结果
+- [ ] 所有组件有单元测试，集成测试通过

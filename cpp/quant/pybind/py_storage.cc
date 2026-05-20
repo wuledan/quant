@@ -31,6 +31,7 @@ static py::dict block_to_dict(const ColumnBlock& block) {
 void bind_storage(py::module_& m) {
     // ── DataField enum ──
     py::enum_<DataField>(m, "DataField")
+        .value("TIMESTAMP", DataField::kTimestamp)
         .value("OPEN", DataField::kOpen)
         .value("HIGH", DataField::kHigh)
         .value("LOW", DataField::kLow)
