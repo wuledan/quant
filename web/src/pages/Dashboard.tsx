@@ -8,10 +8,12 @@ import {
   CheckCircleOutlined,
   CloudSyncOutlined,
   DatabaseOutlined,
+  WifiOutlined,
 } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
 const API_BASE = '/api/v1';
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws`;
 
 interface SchedulerStatus {
   running: boolean;
@@ -26,7 +28,10 @@ const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [systemRunning, setSystemRunning] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [ws, setWs] = useState<WebSocket | null>(null);
 
+  // Initial REST fetch for scheduler status
   const fetchStatus = async () => {
     try {
       const res = await fetch(`${API_BASE}/data/scheduler_status`);
@@ -42,8 +47,53 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => {
     fetchStatus();
-    const timer = setInterval(fetchStatus, 30000);
-    return () => clearInterval(timer);
+  }, []);
+
+  // WebSocket for real-time system updates
+  useEffect(() => {
+    const socket = new WebSocket(WS_URL);
+    setWs(socket);
+
+    socket.onopen = () => {
+      setWsConnected(true);
+      // Subscribe to system channel for status updates
+      socket.send(JSON.stringify({ action: 'subscribe', channels: ['system'] }));
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.channel === 'system' && msg.data) {
+          const data = msg.data as Record<string, unknown>;
+          if (data.scheduler_status) {
+            setSchedulerStatus(data.scheduler_status as SchedulerStatus);
+            setSystemRunning((data.scheduler_status as SchedulerStatus).running);
+          }
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    socket.onclose = () => {
+      setWsConnected(false);
+    };
+
+    // Heartbeat
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ action: 'ping' }));
+      }
+    }, 30000);
+
+    // Periodic REST fallback for scheduler status
+    const pollTimer = setInterval(fetchStatus, 30000);
+
+    return () => {
+      clearInterval(heartbeat);
+      clearInterval(pollTimer);
+      socket.close();
+    };
   }, []);
 
   return (
@@ -57,6 +107,15 @@ const Dashboard: React.FC = () => {
               title="系统状态"
               value={systemRunning ? '运行中' : '已停止'}
               prefix={<Badge status={systemRunning ? 'success' : 'default'} />}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={6}>
+          <Card>
+            <Statistic
+              title="WS 连接"
+              value={wsConnected ? '已连接' : '断开'}
+              prefix={<WifiOutlined style={{ color: wsConnected ? '#52c41a' : '#999' }} />}
             />
           </Card>
         </Col>
@@ -77,16 +136,6 @@ const Dashboard: React.FC = () => {
               value={schedulerStatus?.daily_cache_count ?? 0}
               suffix="个标的"
               prefix={<CloudSyncOutlined />}
-            />
-          </Card>
-        </Col>
-        <Col xs={24} sm={12} lg={6}>
-          <Card>
-            <Statistic
-              title="新闻缓存"
-              value={schedulerStatus?.news_cache_count ?? 0}
-              suffix="条"
-              prefix={<FundOutlined />}
             />
           </Card>
         </Col>
@@ -118,6 +167,10 @@ const Dashboard: React.FC = () => {
                 <Space>
                   <Badge status={schedulerStatus.running ? 'processing' : 'default'} />
                   <Text>调度服务: {schedulerStatus.running ? '运行中' : '未启动'}</Text>
+                </Space>
+                <Space>
+                  <Badge status={wsConnected ? 'success' : 'warning'} />
+                  <Text>WebSocket: {wsConnected ? '已连接' : '断开'}</Text>
                 </Space>
                 <Space>
                   <Badge status={schedulerStatus.daily_cache_count > 0 ? 'success' : 'warning'} />

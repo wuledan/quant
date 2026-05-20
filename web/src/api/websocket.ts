@@ -15,6 +15,9 @@ export class MarketWebSocket {
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isManualDisconnect = false;
+  private subscribedChannels: Set<string> = new Set();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatInterval = 30000;
 
   private messageCallbacks: MessageCallback[] = [];
   private openCallbacks: EventCallback[] = [];
@@ -35,6 +38,7 @@ export class MarketWebSocket {
   disconnect(): void {
     this.isManualDisconnect = true;
     this.clearReconnectTimer();
+    this.stopHeartbeat();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -42,11 +46,20 @@ export class MarketWebSocket {
   }
 
   subscribe(channel: string): void {
-    this.send({ type: 'subscribe', channel });
+    this.subscribedChannels.add(channel);
+    this.send({ action: 'subscribe', channels: [channel] });
+  }
+
+  subscribeChannels(channels: string[]): void {
+    for (const ch of channels) {
+      this.subscribedChannels.add(ch);
+    }
+    this.send({ action: 'subscribe', channels });
   }
 
   unsubscribe(channel: string): void {
-    this.send({ type: 'unsubscribe', channel });
+    this.subscribedChannels.delete(channel);
+    this.send({ action: 'unsubscribe', channels: [channel] });
   }
 
   send(data: unknown): void {
@@ -92,9 +105,14 @@ export class MarketWebSocket {
 
     this.ws = new WebSocket(this.url);
 
-    this.ws.onopen = (event: Event) => {
+    this.ws.onopen = (_event: Event) => {
       this.reconnectAttempts = 0;
-      this.openCallbacks.forEach((cb) => cb(event));
+      this.startHeartbeat();
+      // Re-subscribe to previously subscribed channels
+      if (this.subscribedChannels.size > 0) {
+        this.send({ action: 'subscribe', channels: Array.from(this.subscribedChannels) });
+      }
+      this.openCallbacks.forEach((cb) => cb(_event));
     };
 
     this.ws.onmessage = (event: MessageEvent) => {
@@ -107,6 +125,7 @@ export class MarketWebSocket {
     };
 
     this.ws.onclose = (event: Event) => {
+      this.stopHeartbeat();
       this.closeCallbacks.forEach((cb) => cb(event));
       if (!this.isManualDisconnect) {
         this.scheduleReconnect();
@@ -116,6 +135,20 @@ export class MarketWebSocket {
     this.ws.onerror = (event: Event) => {
       this.errorCallbacks.forEach((cb) => cb(event));
     };
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      this.send({ action: 'ping' });
+    }, this.heartbeatInterval);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

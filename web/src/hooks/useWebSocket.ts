@@ -7,10 +7,11 @@ interface UseWebSocketReturn {
   lastMessage: WebSocketMessage | null;
   send: (data: unknown) => void;
   subscribe: (channel: string) => void;
+  subscribeChannels: (channels: string[]) => void;
   unsubscribe: (channel: string) => void;
 }
 
-export function useWebSocket(url: string): UseWebSocketReturn {
+export function useWebSocket(url: string, initialChannels?: string[]): UseWebSocketReturn {
   const wsRef = useRef<MarketWebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
@@ -26,6 +27,21 @@ export function useWebSocket(url: string): UseWebSocketReturn {
     });
 
     ws.connect(url);
+
+    // Auto-subscribe to initial channels after connection
+    if (initialChannels && initialChannels.length > 0) {
+      const unsubOpenSub = ws.onOpen(() => {
+        ws.subscribeChannels(initialChannels);
+      });
+      return () => {
+        unsubOpen();
+        unsubClose();
+        unsubMsg();
+        unsubOpenSub();
+        ws.disconnect();
+        wsRef.current = null;
+      };
+    }
 
     return () => {
       unsubOpen();
@@ -44,9 +60,13 @@ export function useWebSocket(url: string): UseWebSocketReturn {
     wsRef.current?.subscribe(channel);
   }, []);
 
+  const subscribeChannels = useCallback((channels: string[]) => {
+    wsRef.current?.subscribeChannels(channels);
+  }, []);
+
   const unsubscribe = useCallback((channel: string) => {
     wsRef.current?.unsubscribe(channel);
   }, []);
 
-  return { isConnected, lastMessage, send, subscribe, unsubscribe };
+  return { isConnected, lastMessage, send, subscribe, subscribeChannels, unsubscribe };
 }

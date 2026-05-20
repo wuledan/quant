@@ -31,6 +31,7 @@ interface MarketState {
   fetchDepth: (symbol: string) => Promise<void>;
   setTicker: (ticker: TickerData) => void;
   setOrderBook: (orderBook: OrderBookData) => void;
+  updateKlineBar: (bar: KlineData) => void;
 }
 
 export const useMarketStore = create<MarketState>()((set, get) => ({
@@ -98,5 +99,15 @@ export const useMarketStore = create<MarketState>()((set, get) => ({
 
   setOrderBook: (orderBook: OrderBookData) => {
     set({ orderBook });
+  },
+
+  updateKlineBar: (bar: KlineData) => {
+    const { klineData } = get();
+    // Replace last bar if same timestamp, otherwise append
+    if (klineData.length > 0 && klineData[klineData.length - 1].timestamp === bar.timestamp) {
+      set({ klineData: [...klineData.slice(0, -1), bar] });
+    } else {
+      set({ klineData: [...klineData, bar] });
+    }
   },
 }));
