@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""策略管理路由 — 对接策略注册表."""
+"""策略管理路由 — 对接策略注册表 + 热重载管理."""
 
 from __future__ import annotations
 
@@ -100,6 +100,60 @@ async def create_strategy(req: StrategyCreate) -> StrategyResponse:
     _mock_strategies[strategy_id] = resp
     return resp
 
+
+# ── 热重载路由（必须在 /{strategy_id} 之前注册，避免路径参数冲突）──
+
+@router.post("/reload/{name}")
+async def reload_strategy(name: str) -> dict:
+    """手动触发策略热重载.
+
+    流程:
+    1. 调用 StrategyRegistry.reload(name) 重新导入策略模块
+    2. 调用 HotReloadManager 重新编译策略
+    3. 更新编译缓存
+
+    Args:
+        name: 策略注册名（如 "ma_cross_dsl"）
+    """
+    from ...strategy.hot_reload import get_hot_reload_manager
+    from ...strategy.registry import StrategyRegistry
+
+    # 检查策略是否存在
+    if not StrategyRegistry.has(name):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Strategy '{name}' not found in registry. "
+                   f"Available: {StrategyRegistry.list_strategies()}",
+        )
+
+    manager = get_hot_reload_manager()
+    result = manager.reload_strategy(name)
+
+    return {
+        "strategy_name": result.strategy_name,
+        "success": result.success,
+        "compiled": result.compiled,
+        "error_message": result.error_message,
+        "previous_version_kept": result.previous_version_kept,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/reload/status")
+async def get_reload_status() -> dict:
+    """获取热重载状态.
+
+    返回:
+    - 热重载管理器状态（缓存大小、编译统计等）
+    - 文件监视器状态（运行状态、监视文件列表、最近重载记录）
+    """
+    from ...strategy.hot_reload import get_hot_reload_manager
+
+    manager = get_hot_reload_manager()
+    return manager.get_status()
+
+
+# ── 策略 CRUD 路由（路径参数路由）──
 
 @router.get("/{strategy_id}", response_model=StrategyResponse)
 async def get_strategy(strategy_id: str) -> StrategyResponse:

@@ -1,6 +1,7 @@
 """策略研究框架"""
 
 from .base import StrategyBase, StrategyParams
+from .compiler import CompiledStrategy, PythonExecutor, StrategyCompiler
 from .dsl import (
     DAGNode,
     Factor,
@@ -22,8 +23,10 @@ from .dsl import (
 )
 from .factor_api import FactorAPI
 from .position_sizer import PositionSizer
-from .registry import StrategyKind, StrategyEntry, StrategyRegistry
+from .registry import StrategyEntry, StrategyKind, StrategyRegistry
 from .signal import SignalGenerator
+from .watcher import ReloadRecord, StrategyWatcher, get_watcher
+from .hot_reload import HotReloadManager, ReloadResult, get_hot_reload_manager
 
 __all__ = [
     # Legacy strategy framework
@@ -53,4 +56,15 @@ __all__ = [
     "is_dsl_strategy",
     "get_factor_decls",
     "get_signal_decls",
+    # Compiler
+    "StrategyCompiler",
+    "CompiledStrategy",
+    "PythonExecutor",
+    # File watcher + hot reload
+    "StrategyWatcher",
+    "ReloadRecord",
+    "get_watcher",
+    "HotReloadManager",
+    "ReloadResult",
+    "get_hot_reload_manager",
 ]

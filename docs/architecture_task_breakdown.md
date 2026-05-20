@@ -5,12 +5,13 @@
 
 ## P0: C++ StorageEngine 接入数据采集
 
-### P0-T1: pybind11 模块编译验证
+### P0-T1: pybind11 模块编译验证 ✅ (2026-05-20)
 - **组件**: `cpp/quant/pybind/` → `_quant_core.so`
 - **任务**: 确认 CMake 编译通过, `import _quant_core` 可用, StorageEngine/FactorDAG/OrderManager 全部可实例化
-- **产出**: 编译脚本, 验证测试
+- **产出**: 编译脚本, 验证测试 (30/30 pass), 设计文档 `docs/p0-t1-pybind-module-design.md`
 - **负责**: storage-engine-expert
 - **依赖**: 无
+- **备注**: 修复了 Result<T> 包装、shm.get() size 字段、枚举值对齐
 
 ### P0-T2: StorageEngine 数据初始化
 - **组件**: `StorageEngine` + `DiskPersistence`
@@ -44,7 +45,7 @@
 
 ## P1: Python 策略热加载 + DAG 编译器
 
-### P1-T1: 策略声明式 DSL 设计
+### P1-T1: 策略声明式 DSL 设计 ✅ (2026-05-20)
 - **组件**: `strategy/dsl.py`
 - **任务**: 定义 Factor / cross_above / cross_below / Strategy 基类, 策略用装饰器 + 类属性声明因子和信号
 - **产出**: `strategy/dsl.py`, 示例策略
