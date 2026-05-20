@@ -240,6 +240,13 @@ if(QUANT_USE_FOLLY)
     endif()
 endif()
 
+# ── strategy library ──
+add_library(quant_strategy
+    cpp/quant/strategy/signal_handler.cc
+)
+target_include_directories(quant_strategy PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_strategy PUBLIC quant_execution quant_event)
+
 # ── risk library ──
 add_library(quant_risk
     cpp/quant/risk/risk_engine.cc
@@ -488,3 +495,8 @@ add_test(NAME op_registry_test COMMAND op_registry_test)
 add_executable(factor_dag_from_graph_test cpp/test/factor_dag_from_graph_test.cc)
 target_link_libraries(factor_dag_from_graph_test PRIVATE quant_factor quant_ir GTest::gtest_main)
 add_test(NAME factor_dag_from_graph_test COMMAND factor_dag_from_graph_test)
+
+# ── Signal handler test ──
+add_executable(signal_handler_test cpp/test/signal_handler_test.cc)
+target_link_libraries(signal_handler_test PRIVATE quant_strategy GTest::gtest_main)
+add_test(NAME signal_handler_test COMMAND signal_handler_test)
