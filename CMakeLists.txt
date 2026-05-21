@@ -221,6 +221,7 @@ add_library(quant_network
     cpp/quant/network/co_io.cc
     cpp/quant/network/global_executor.cc
     cpp/quant/network/global_io.cc
+    cpp/quant/network/http_server.cc
 )
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR})
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
@@ -398,6 +399,10 @@ add_executable(network_test cpp/test/network_test.cc)
 target_link_libraries(network_test PRIVATE quant_network GTest::gtest_main)
 add_test(NAME network_test COMMAND network_test)
 
+add_executable(http_server_test cpp/test/http_server_test.cc)
+target_link_libraries(http_server_test PRIVATE quant_network GTest::gtest_main)
+add_test(NAME http_server_test COMMAND http_server_test)
+
 add_executable(scheduler_test cpp/test/scheduler_test.cc)
 target_link_libraries(scheduler_test PRIVATE quant_scheduler GTest::gtest_main)
 add_test(NAME scheduler_test COMMAND scheduler_test)
@@ -554,9 +559,11 @@ add_test(NAME strategy_api_test COMMAND strategy_api_test)
 # ── Service main ──
 add_executable(quant_service cpp/quant/service/service_main.cc)
 target_include_directories(quant_service PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
-target_link_libraries(quant_service PRIVATE quant_strategy quant_backtest quant_scheduler quant_ingest quant_network quant_infra)
+target_link_libraries(quant_service PRIVATE quant_api quant_strategy quant_backtest quant_scheduler quant_ingest quant_network quant_infra)
 
 # ── Service test ──
 add_executable(service_main_test cpp/test/service_main_test.cc)
 target_link_libraries(service_main_test PRIVATE quant_strategy quant_backtest quant_scheduler quant_infra GTest::gtest_main)
 add_test(NAME service_main_test COMMAND service_main_test)
+
+# ── HTTP server test ── (defined above near network_test)

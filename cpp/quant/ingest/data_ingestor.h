@@ -100,12 +100,6 @@ private:
     CoTask<void> receive_loop();
     CoTask<void> heartbeat_loop();
 
-    // ── Data parsing ──
-    // Parse a raw message into KlineData
-    // Protocol: JSON or binary (configurable)
-    bool parse_kline(const char* data, size_t len,
-                     std::string& symbol, KlineData& kline);
-
     // ── Storage ──
     bool store_kline(const std::string& symbol, const KlineData& kline);
 

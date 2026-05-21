@@ -29,19 +29,34 @@ namespace quant::ingest {
 // JSON extraction helpers
 // ────────────────────────────────────────────────────────────────
 
-static bool extract_int64(const char* json, size_t len,
-                          const char* key, int64_t& out) {
+// Find a JSON key and return pointer to the start of its value.
+// Handles optional whitespace around the colon: "key":value or "key" : value.
+static const char* find_json_value(const char* json, size_t len,
+                                    const char* key) {
     std::string search = "\"";
     search += key;
-    search += "\":";
+    search += "\"";
 
     const char* p = static_cast<const char*>(
         memmem(json, len, search.data(), search.size()));
-    if (!p) return false;
+    if (!p) return nullptr;
 
     p += search.size();
+    // Skip whitespace before ':'
     while (p < json + len && (*p == ' ' || *p == '\t')) p++;
-    if (p >= json + len) return false;
+    if (p >= json + len || *p != ':') return nullptr;
+    p++;  // Skip ':'
+    // Skip whitespace after ':'
+    while (p < json + len && (*p == ' ' || *p == '\t')) p++;
+    if (p >= json + len) return nullptr;
+
+    return p;
+}
+
+static bool extract_int64(const char* json, size_t len,
+                          const char* key, int64_t& out) {
+    const char* p = find_json_value(json, len, key);
+    if (!p) return false;
 
     char* end = nullptr;
     out = std::strtoll(p, &end, 10);
@@ -50,15 +65,15 @@ static bool extract_int64(const char* json, size_t len,
 
 static bool extract_string(const char* json, size_t len,
                            const char* key, std::string& out) {
-    std::string search = "\"";
-    search += key;
-    search += "\":\"";
-
-    const char* p = static_cast<const char*>(
-        memmem(json, len, search.data(), search.size()));
+    // Build pattern to find "key":" or with whitespace:
+    // Start by finding "key"
+    const char* p = find_json_value(json, len, key);
     if (!p) return false;
 
-    p += search.size();
+    // After the colon, expect a quote for string values
+    if (*p != '"') return false;
+    p++;
+
     const char* end = static_cast<const char*>(
         memchr(p, '"', static_cast<size_t>((json + len) - p)));
     if (!end) return false;
@@ -71,21 +86,27 @@ static bool extract_string(const char* json, size_t len,
 // Network protocol sends price fields as floats (e.g. 3400.50).
 static bool extract_double(const char* json, size_t len,
                            const char* key, double& out) {
-    std::string search = "\"";
-    search += key;
-    search += "\":";
-
-    const char* p = static_cast<const char*>(
-        memmem(json, len, search.data(), search.size()));
+    const char* p = find_json_value(json, len, key);
     if (!p) return false;
-
-    p += search.size();
-    while (p < json + len && (*p == ' ' || *p == '\t')) p++;
-    if (p >= json + len) return false;
 
     char* end = nullptr;
     out = std::strtod(p, &end);
     return end != p;
+}
+
+// Check if a price field value is a float (contains decimal point).
+// Network protocol sends prices as floats (e.g. 3400.50), while internal/
+// backfill sources may send already-fixed-point integers (e.g. 34005000).
+static bool price_is_float(const char* json, size_t len, const char* key) {
+    const char* p = find_json_value(json, len, key);
+    if (!p) return false;
+
+    // Scan for '.' before ',' or '}' or end
+    while (p < json + len && *p != ',' && *p != '}' && *p != '\n') {
+        if (*p == '.') return true;
+        p++;
+    }
+    return false;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -348,28 +369,34 @@ bool DataIngestor::parse_kline(const char* data, size_t len,
     if (!extract_string(data, len, "symbol", symbol)) return false;
     if (!extract_int64(data, len, "ts", kline.timestamp)) return false;
 
-    // Price fields arrive as floats from the network protocol.
-    // Convert to int64_t fixed-point (×10000) for internal storage.
+    // Price fields arrive as floats from the network protocol (e.g. 3400.50).
+    // When the JSON value contains a decimal point, it's a float and needs
+    // conversion to int64_t fixed-point (×10000). When the value is an integer,
+    // it's already in fixed-point format and should be used as-is.
     double tmp = 0.0;
-    if (extract_double(data, len, "open", tmp)) {
+    if (price_is_float(data, len, "open")) {
+        if (!extract_double(data, len, "open", tmp)) return false;
         kline.open = static_cast<int64_t>(tmp * 10000.0 + 0.5);
     } else if (!extract_int64(data, len, "open", kline.open)) {
         return false;
     }
 
-    if (extract_double(data, len, "high", tmp)) {
+    if (price_is_float(data, len, "high")) {
+        if (!extract_double(data, len, "high", tmp)) return false;
         kline.high = static_cast<int64_t>(tmp * 10000.0 + 0.5);
     } else if (!extract_int64(data, len, "high", kline.high)) {
         return false;
     }
 
-    if (extract_double(data, len, "low", tmp)) {
+    if (price_is_float(data, len, "low")) {
+        if (!extract_double(data, len, "low", tmp)) return false;
         kline.low = static_cast<int64_t>(tmp * 10000.0 + 0.5);
     } else if (!extract_int64(data, len, "low", kline.low)) {
         return false;
     }
 
-    if (extract_double(data, len, "close", tmp)) {
+    if (price_is_float(data, len, "close")) {
+        if (!extract_double(data, len, "close", tmp)) return false;
         kline.close = static_cast<int64_t>(tmp * 10000.0 + 0.5);
     } else if (!extract_int64(data, len, "close", kline.close)) {
         return false;

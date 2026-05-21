@@ -7,8 +7,9 @@
 // 4. StrategyEngine (with EventBus + StorageEngine)
 // 5. SchedulerService and start it
 // 6. DataIngestor with a default DataSourceConfig
-// 7. WebSocketServer for frontend communication
-// 8. Handle graceful shutdown on SIGINT/SIGTERM
+// 7. HttpServer for REST API (StrategyApi routing)
+// 8. WebSocketServer for frontend communication
+// 9. Handle graceful shutdown on SIGINT/SIGTERM
 
 #include <csignal>
 #include <cstdlib>
@@ -17,9 +18,12 @@
 #include <string>
 #include <thread>
 
+#include "cpp/quant/api/strategy_api.h"
+#include "cpp/quant/backtest/backtest_runner.h"
 #include "cpp/quant/event/event_bus.h"
 #include "cpp/quant/ingest/data_ingestor.h"
 #include "cpp/quant/network/global_executor.h"
+#include "cpp/quant/network/http_server.h"
 #include "cpp/quant/network/websocket_server.h"
 #include "cpp/quant/scheduler/scheduler_service.h"
 #include "cpp/quant/storage/storage_engine.h"
@@ -82,7 +86,29 @@ int main(int argc, char* argv[]) {
     ingest::DataIngestor ingestor(storage.store(), bus, ingest_config);
     std::cout << "[Service] DataIngestor created\n";
 
-    // ── 7. Create WebSocketServer ──
+    // ── 7. Create BacktestRunner and StrategyApi ──
+    backtest::BacktestRunner backtest_runner(storage, bus);
+    api::StrategyApi strategy_api(strategy_engine, backtest_runner, storage);
+    std::cout << "[Service] BacktestRunner and StrategyApi created\n";
+
+    // ── 8. Create HttpServer for REST API ──
+    network::HttpServerConfig http_config;
+    http_config.port = 9090;
+    http_config.host = "0.0.0.0";
+
+    network::HttpServer http_server(http_config);
+    http_server.set_handler([&strategy_api](const network::HttpRequest& req) -> network::HttpResponse {
+        auto api_resp = strategy_api.handle_request(req.method, req.path, req.body);
+        network::HttpResponse http_resp;
+        http_resp.status_code = api_resp.status_code;
+        http_resp.body = api_resp.body;
+        return http_resp;
+    });
+
+    http_server.start();
+    std::cout << "[Service] HttpServer started (port=9090)\n";
+
+    // ── 9. Create WebSocketServer ──
     network::WsServerConfig ws_config;
     ws_config.port = 8080;
     ws_config.host = "0.0.0.0";
@@ -106,6 +132,9 @@ int main(int argc, char* argv[]) {
 
     // ── Graceful shutdown ──
     std::cout << "[Service] Shutting down...\n";
+
+    http_server.stop();
+    std::cout << "[Service] HttpServer stopped\n";
 
     ws_server.stop();
     std::cout << "[Service] WebSocketServer stopped\n";
