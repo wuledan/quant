@@ -296,6 +296,8 @@ if(pybind11_FOUND)
         cpp/quant/pybind/py_execution.cc
         cpp/quant/pybind/py_risk.cc
         cpp/quant/pybind/py_ingest.cc
+        cpp/quant/pybind/py_ir.cc
+        cpp/quant/pybind/py_backtest.cc
     )
     target_include_directories(_quant_core PRIVATE ${CMAKE_SOURCE_DIR})
     target_link_libraries(_quant_core PRIVATE
@@ -306,6 +308,10 @@ if(pybind11_FOUND)
         quant_ingest
         quant_event
         quant_infra
+        quant_ir
+        quant_backtest
+        quant_strategy
+        quant_portfolio
     )
     set_target_properties(_quant_core PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/py/src/quant_invest"
@@ -527,3 +533,13 @@ add_test(NAME backtest_test COMMAND backtest_test)
 add_executable(strategy_center_test cpp/test/strategy_center_test.cc)
 target_link_libraries(strategy_center_test PRIVATE quant_strategy GTest::gtest_main)
 add_test(NAME strategy_center_test COMMAND strategy_center_test)
+
+# ── Service main ──
+add_executable(quant_service cpp/quant/service/service_main.cc)
+target_include_directories(quant_service PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
+target_link_libraries(quant_service PRIVATE quant_strategy quant_backtest quant_scheduler quant_ingest quant_network quant_infra)
+
+# ── Service test ──
+add_executable(service_main_test cpp/test/service_main_test.cc)
+target_link_libraries(service_main_test PRIVATE quant_strategy quant_backtest quant_scheduler quant_infra GTest::gtest_main)
+add_test(NAME service_main_test COMMAND service_main_test)

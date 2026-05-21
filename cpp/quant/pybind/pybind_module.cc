@@ -11,8 +11,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cpp/quant/pybind/py_backtest.h"
 #include "cpp/quant/pybind/py_execution.h"
 #include "cpp/quant/pybind/py_factor.h"
+#include "cpp/quant/pybind/py_ir.h"
 #include "cpp/quant/pybind/py_risk.h"
 #include "cpp/quant/pybind/py_storage.h"
 
@@ -106,6 +108,8 @@ PYBIND11_MODULE(_quant_core, m) {
     quant::pybind::bind_factor(m);
     quant::pybind::bind_execution(m);
     quant::pybind::bind_risk(m);
+    quant::pybind::bind_ir(m);
+    quant::pybind::bind_backtest(m);
 
     // ── Zero-copy transfer utilities ──
     m.def("vector_to_numpy", &vector_to_numpy,
