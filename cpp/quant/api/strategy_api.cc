@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 
@@ -312,6 +313,7 @@ ApiResponse StrategyApi::register_strategy(const std::string& body) {
 
     std::string name;
     std::string graph_path;
+    std::string graph_content;  // JSON string of the .graph IR
     std::unordered_map<std::string, double> params;
 
     try {
@@ -324,6 +326,8 @@ ApiResponse StrategyApi::register_strategy(const std::string& body) {
                 name = p.parse_string();
             } else if (k == "graph_path") {
                 graph_path = p.parse_string();
+            } else if (k == "graph_content") {
+                graph_content = p.parse_string();
             } else if (k == "params") {
                 params = parse_params(p);
             } else {
@@ -337,6 +341,24 @@ ApiResponse StrategyApi::register_strategy(const std::string& body) {
 
     if (name.empty()) {
         return error_response(400, "Missing required field: name");
+    }
+
+    // If graph_content is provided, write it to ./data/graphs/{name}.graph
+    // and use that path for registration. This allows Python to upload the
+    // compiled IR JSON directly instead of requiring a pre-existing file.
+    if (!graph_content.empty()) {
+        std::string graphs_dir = "./data/graphs";
+        // Ensure directory exists
+        std::string mkdir_cmd = "mkdir -p " + graphs_dir;
+        (void)std::system(mkdir_cmd.c_str());
+
+        graph_path = graphs_dir + "/" + name + ".graph";
+        std::ofstream ofs(graph_path);
+        if (!ofs.is_open()) {
+            return error_response(500, "Failed to write graph file: " + graph_path);
+        }
+        ofs << graph_content;
+        ofs.close();
     }
 
     auto id = engine_.registry().register_strategy(name, graph_path, params);
