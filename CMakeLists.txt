@@ -174,6 +174,7 @@ add_library(quant_storage
     cpp/quant/storage/time_series_store.cc
     cpp/quant/storage/disk_persistence.cc
     cpp/quant/storage/storage_engine.cc
+    cpp/quant/storage/data_initializer.cc
 )
 target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_storage PUBLIC quant_event quant_network)
@@ -570,5 +571,10 @@ target_link_libraries(quant_service PRIVATE quant_api quant_strategy quant_backt
 add_executable(service_main_test cpp/test/service_main_test.cc)
 target_link_libraries(service_main_test PRIVATE quant_strategy quant_backtest quant_scheduler quant_infra GTest::gtest_main)
 add_test(NAME service_main_test COMMAND service_main_test)
+
+# ── Data initializer test ──
+add_executable(data_initializer_test cpp/test/data_initializer_test.cc)
+target_link_libraries(data_initializer_test PRIVATE quant_storage quant_event GTest::gtest_main)
+add_test(NAME data_initializer_test COMMAND data_initializer_test)
 
 # ── HTTP server test ── (defined above near network_test)

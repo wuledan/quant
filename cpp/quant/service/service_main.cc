@@ -27,6 +27,7 @@
 #include "cpp/quant/network/websocket_server.h"
 #include "cpp/quant/network/ws_event_bridge.h"
 #include "cpp/quant/scheduler/scheduler_service.h"
+#include "cpp/quant/storage/data_initializer.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/strategy_engine.h"
 
@@ -58,6 +59,17 @@ int main(int argc, char* argv[]) {
     storage_opts.cache_budget_mb = 256;
     storage::StorageEngine storage(storage_opts);
     std::cout << "[Service] StorageEngine created (data_dir=./data, cache_budget=256MB)\n";
+
+    // ── Load historical data from CSV ──
+    storage::DataInitializer data_init(storage);
+    int loaded = data_init.load_csv_dir("./data/csv_daily");
+    auto init_stats = data_init.stats();
+    if (loaded > 0) {
+        std::cout << "[Service] Loaded " << init_stats.rows_loaded << " rows from "
+                  << init_stats.files_loaded << " files (" << init_stats.rows_failed << " failed)\n";
+    } else {
+        std::cout << "[Service] No historical data found in ./data/csv_daily\n";
+    }
 
     // ── 3. Create EventBus and start it ──
     event::EventBus::Options bus_opts;
