@@ -218,6 +218,7 @@ add_library(quant_network
     cpp/quant/network/tcp_connection.cc
     cpp/quant/network/websocket_server.cc
     cpp/quant/network/ws_session.cc
+    cpp/quant/network/ws_event_bridge.cc
     cpp/quant/network/co_io.cc
     cpp/quant/network/global_executor.cc
     cpp/quant/network/global_io.cc
@@ -225,7 +226,7 @@ add_library(quant_network
 )
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR})
 target_include_directories(quant_network PUBLIC ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
-target_link_libraries(quant_network PUBLIC quant_infra)
+target_link_libraries(quant_network PUBLIC quant_infra quant_event)
 
 if(QUANT_USE_FOLLY)
     # liburing for io_uring support in CoIouring
@@ -557,6 +558,10 @@ target_link_libraries(strategy_api_test PRIVATE quant_api GTest::gtest_main)
 add_test(NAME strategy_api_test COMMAND strategy_api_test)
 
 # ── Service main ──
+add_executable(ws_event_bridge_test cpp/test/test_ws_event_bridge.cc)
+target_link_libraries(ws_event_bridge_test PRIVATE quant_network quant_event GTest::gtest_main)
+add_test(NAME ws_event_bridge_test COMMAND ws_event_bridge_test)
+
 add_executable(quant_service cpp/quant/service/service_main.cc)
 target_include_directories(quant_service PRIVATE ${CMAKE_SOURCE_DIR}/cpp/quant/infra)
 target_link_libraries(quant_service PRIVATE quant_api quant_strategy quant_backtest quant_scheduler quant_ingest quant_network quant_infra)

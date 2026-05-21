@@ -25,6 +25,7 @@
 #include "cpp/quant/network/global_executor.h"
 #include "cpp/quant/network/http_server.h"
 #include "cpp/quant/network/websocket_server.h"
+#include "cpp/quant/network/ws_event_bridge.h"
 #include "cpp/quant/scheduler/scheduler_service.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/strategy_engine.h"
@@ -120,6 +121,11 @@ int main(int argc, char* argv[]) {
     // ── Start WebSocketServer ──
     ws_server.start();
     std::cout << "[Service] WebSocketServer started\n";
+
+    // ── 10. Create WsEventBridge: EventBus → WebSocket broadcast ──
+    network::WsEventBridge ws_bridge(bus, ws_server);
+    ws_bridge.start();
+    std::cout << "[Service] WsEventBridge started (EventBus → WebSocket)\n";
 
     // ── All components initialized ──
     std::cout << "[Service] All components initialized. Service is running.\n";
