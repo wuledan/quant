@@ -243,9 +243,26 @@ endif()
 # ── strategy library ──
 add_library(quant_strategy
     cpp/quant/strategy/signal_handler.cc
+    cpp/quant/strategy/strategy_registry.cc
+    cpp/quant/strategy/strategy_engine.cc
 )
 target_include_directories(quant_strategy PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(quant_strategy PUBLIC quant_execution quant_event)
+target_link_libraries(quant_strategy PUBLIC quant_execution quant_event quant_factor quant_ir quant_storage)
+
+# ── portfolio library ──
+add_library(quant_portfolio
+    cpp/quant/portfolio/portfolio.cc
+)
+target_include_directories(quant_portfolio PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_portfolio PUBLIC quant_execution)
+
+# ── backtest library ──
+add_library(quant_backtest
+    cpp/quant/backtest/simulated_broker.cc
+    cpp/quant/backtest/backtest_runner.cc
+)
+target_include_directories(quant_backtest PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_backtest PUBLIC quant_portfolio quant_strategy quant_factor quant_ir quant_storage quant_event quant_infra)
 
 # ── risk library ──
 add_library(quant_risk
@@ -500,3 +517,13 @@ add_test(NAME factor_dag_from_graph_test COMMAND factor_dag_from_graph_test)
 add_executable(signal_handler_test cpp/test/signal_handler_test.cc)
 target_link_libraries(signal_handler_test PRIVATE quant_strategy GTest::gtest_main)
 add_test(NAME signal_handler_test COMMAND signal_handler_test)
+
+# ── Backtest test ──
+add_executable(backtest_test cpp/test/backtest_test.cc)
+target_link_libraries(backtest_test PRIVATE quant_backtest GTest::gtest_main)
+add_test(NAME backtest_test COMMAND backtest_test)
+
+# ── Strategy center test ──
+add_executable(strategy_center_test cpp/test/strategy_center_test.cc)
+target_link_libraries(strategy_center_test PRIVATE quant_strategy GTest::gtest_main)
+add_test(NAME strategy_center_test COMMAND strategy_center_test)
