@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <sstream>
 #include <stdexcept>
 
@@ -243,6 +244,11 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         return register_strategy(body);
     }
 
+    // POST /api/strategies/batch-backtest — batch backtest (intercept before ID parsing)
+    if (segments.size() == 3 && segments[2] == "batch-backtest" && method == "POST") {
+        return batch_backtest(body);
+    }
+
     // Need an ID at position 2
     if (segments.size() < 3) {
         return error_response(400, "Missing strategy ID");
@@ -264,9 +270,11 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
     // /api/strategies/:id/<action>
     if (segments.size() == 4) {
         const auto& action = segments[3];
-        if (action == "activate" && method == "POST") return activate_strategy(id);
-        if (action == "pause" && method == "POST")    return pause_strategy(id);
-        if (action == "backtest" && method == "POST") return trigger_backtest(id, body);
+        if (action == "activate" && method == "POST")         return activate_strategy(id);
+        if (action == "pause" && method == "POST")            return pause_strategy(id);
+        if (action == "backtest" && method == "POST")         return trigger_backtest(id, body);
+        if (action == "backtest-history" && method == "GET")  return backtest_history(id);
+        if (action == "clone" && method == "POST")            return clone_strategy(id);
         return error_response(404, "Not found");
     }
 
@@ -483,14 +491,179 @@ ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) 
     }
 
     // Build response with strategy_id and result
+    std::string result_json = result_to_json(result);
+
+    // Record history entry
+    BacktestHistoryEntry hist_entry;
+    hist_entry.timestamp = std::time(nullptr);
+    hist_entry.result_json = result_json;
+    history_[id].insert(history_[id].begin(), std::move(hist_entry));
+
     JsonWriter w;
     w.begin_obj();
     w.key("strategy_id"); w.int_val(static_cast<int64_t>(id)); w.comma();
     w.key("result");
-    w.os << result_to_json(result);
+    w.os << result_json;
     w.end_obj();
 
     return success_response(w.os.str());
+}
+
+// ── Batch backtest ──
+
+ApiResponse StrategyApi::batch_backtest(const std::string& body) {
+    JsonParser p{body.data(), body.size(), 0};
+
+    std::vector<uint64_t> strategy_ids;
+    backtest::BacktestParams params;
+
+    try {
+        p.expect('{');
+        while (true) {
+            auto k = p.next_key();
+            if (k.empty()) break;
+            p.expect(':');
+            if (k == "strategy_ids") {
+                p.expect('[');
+                p.skip_ws();
+                while (p.peek() != ']') {
+                    strategy_ids.push_back(
+                        static_cast<uint64_t>(p.parse_number()));
+                    if (p.peek() == ',') p.next();
+                }
+                p.expect(']');
+            } else if (k == "params") {
+                // Parse backtest params object
+                p.expect('{');
+                while (true) {
+                    auto pk = p.next_key();
+                    if (pk.empty()) break;
+                    p.expect(':');
+                    if (pk == "initial_cash") {
+                        params.initial_cash = p.parse_number();
+                    } else if (pk == "start_time") {
+                        params.start_time = static_cast<int64_t>(p.parse_number());
+                    } else if (pk == "end_time") {
+                        params.end_time = static_cast<int64_t>(p.parse_number());
+                    } else if (pk == "symbol") {
+                        params.symbol = p.parse_string();
+                    } else {
+                        p.skip_value();
+                    }
+                }
+                p.expect('}');
+            } else {
+                p.skip_value();
+            }
+        }
+        p.expect('}');
+    } catch (const std::exception& e) {
+        return error_response(400, std::string("Invalid JSON: ") + e.what());
+    }
+
+    if (strategy_ids.empty()) {
+        return error_response(400, "Empty strategy_ids");
+    }
+
+    JsonWriter w;
+    w.begin_obj();
+    w.key("results");
+    w.begin_arr();
+    for (size_t i = 0; i < strategy_ids.size(); ++i) {
+        auto sid = strategy_ids[i];
+        auto* entry = engine_.registry().find(sid);
+
+        w.begin_obj();
+        w.key("strategy_id");
+        w.int_val(static_cast<int64_t>(sid));
+        w.comma();
+
+        if (!entry) {
+            w.key("error");
+            w.str_val("Strategy not found");
+        } else if (entry->graph_path.empty()) {
+            w.key("error");
+            w.str_val("No graph_path configured");
+        } else {
+            try {
+                auto result = runner_.run(entry->graph_path, params);
+                std::string result_json = result_to_json(result);
+
+                // Record history for this strategy
+                BacktestHistoryEntry hist_entry;
+                hist_entry.timestamp = std::time(nullptr);
+                hist_entry.result_json = result_json;
+                history_[sid].insert(history_[sid].begin(), std::move(hist_entry));
+
+                w.key("result");
+                w.os << result_json;
+            } catch (const std::exception& e) {
+                w.key("error");
+                w.str_val(std::string("Backtest failed: ") + e.what());
+            }
+        }
+
+        w.end_obj();
+        if (i + 1 < strategy_ids.size()) w.comma();
+    }
+    w.end_arr();
+    w.end_obj();
+
+    return success_response(w.os.str());
+}
+
+// ── Backtest history ──
+
+ApiResponse StrategyApi::backtest_history(uint64_t id) {
+    auto* entry = engine_.registry().find(id);
+    if (!entry) {
+        return error_response(404, "Strategy not found");
+    }
+
+    JsonWriter w;
+    w.begin_obj();
+    w.key("history");
+    w.begin_arr();
+
+    auto it = history_.find(id);
+    if (it != history_.end()) {
+        const auto& entries = it->second;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            w.begin_obj();
+            w.key("timestamp");
+            w.int_val(entries[i].timestamp);
+            w.comma();
+            w.key("result");
+            w.os << entries[i].result_json;
+            w.end_obj();
+            if (i + 1 < entries.size()) w.comma();
+        }
+    }
+
+    w.end_arr();
+    w.end_obj();
+
+    return success_response(w.os.str());
+}
+
+// ── Clone strategy ──
+
+ApiResponse StrategyApi::clone_strategy(uint64_t id) {
+    auto* entry = engine_.registry().find(id);
+    if (!entry) {
+        return error_response(404, "Strategy not found");
+    }
+
+    std::string clone_name = entry->name + "-copy";
+    auto new_id = engine_.registry().register_strategy(
+        clone_name, entry->graph_path, entry->params);
+
+    auto* new_entry = engine_.registry().find(new_id);
+    if (!new_entry) {
+        return error_response(500, "Failed to clone strategy");
+    }
+
+    return {201, entry_to_json(*new_entry)};
 }
 
 // ── JSON serialization ──

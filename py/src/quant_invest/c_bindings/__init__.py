@@ -80,6 +80,36 @@ try:
         RiskEngineStats,
     )
 
+    # Re-export IR graph
+    from quant_invest._quant_core import (  # noqa: F401
+        DataBinding,
+        EdgeDef,
+        IRSignalHandler,
+        NodeDef,
+        PortDef,
+        StrategyGraph,
+        TypeSpec,
+    )
+
+    # Re-export backtest + strategy
+    from quant_invest._quant_core import (  # noqa: F401
+        BacktestParams,
+        BacktestResult,
+        BacktestRunner,
+        EventBus,
+        EventBusOptions,
+        EventBusStats,
+        Portfolio,
+        Position,
+        SimulatedBroker,
+        SimulatedBrokerConfig,
+        SimulatedFill,
+        StrategyEngine,
+        StrategyEntry,
+        StrategyRegistry,
+        StrategyStatus,
+    )
+
     # Zero-copy utilities
     from quant_invest._quant_core import (  # noqa: F401
         numpy_to_vector,

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "cpp/quant/backtest/backtest_runner.h"
 #include "cpp/quant/strategy/strategy_registry.h"
@@ -15,6 +16,11 @@ namespace quant::api {
 struct ApiResponse {
     int status_code = 200;
     std::string body;
+};
+
+struct BacktestHistoryEntry {
+    int64_t timestamp;
+    std::string result_json;
 };
 
 class StrategyApi {
@@ -36,6 +42,9 @@ private:
     ApiResponse activate_strategy(uint64_t id);
     ApiResponse pause_strategy(uint64_t id);
     ApiResponse trigger_backtest(uint64_t id, const std::string& body);
+    ApiResponse batch_backtest(const std::string& body);
+    ApiResponse backtest_history(uint64_t id);
+    ApiResponse clone_strategy(uint64_t id);
 
     std::string entry_to_json(const strategy::StrategyEntry& entry);
     std::string result_to_json(const backtest::BacktestResult& result);
@@ -43,6 +52,9 @@ private:
     strategy::StrategyEngine& engine_;
     backtest::BacktestRunner& runner_;
     storage::StorageEngine& storage_;
+
+    // key: strategy_id, value: list of history entries (newest first)
+    std::unordered_map<uint64_t, std::vector<BacktestHistoryEntry>> history_;
 };
 
 }  // namespace quant::api

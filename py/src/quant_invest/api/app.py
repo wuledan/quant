@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import backtest, data, factor, news, portfolio, risk, strategy, system
+from .strategy_api import router as strategy_v2_router
 from .ws import WebSocketManager
 from .ws_server import WebSocketServer, get_ws_server
 from .event_bus import EventBusBridge, get_event_bus
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     # 注册路由
     app.include_router(data.router, prefix="/api/v1/data", tags=["数据查询"])
     app.include_router(strategy.router, prefix="/api/v1/strategy", tags=["策略管理"])
+    app.include_router(strategy_v2_router, prefix="/api/v2/strategies", tags=["策略API v2"])
     app.include_router(backtest.router, prefix="/api/v1/backtest", tags=["回测"])
     app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["持仓组合"])
     app.include_router(factor.router, prefix="/api/v1/factor", tags=["因子"])

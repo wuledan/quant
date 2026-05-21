@@ -56,6 +56,7 @@ class BacktestEngine:
     """事件驱动回测引擎
 
     支持 C++ OrderManager 执行模式（use_cpp_execution=True），
+    支持 DSL 策略的 FactorEngineBridge 因子计算，
     默认使用 Python SimulatedBroker（向后兼容）。
     """
 
@@ -69,6 +70,7 @@ class BacktestEngine:
         benchmark: str = "000300.SH",
         on_progress: Any | None = None,
         use_cpp_execution: bool = False,
+        use_factor_engine: bool = True,
     ) -> None:
         self.data_handler = data_handler
         self.broker = broker
@@ -88,6 +90,12 @@ class BacktestEngine:
         self._order_adapter: Any | None = None
         if use_cpp_execution:
             self._init_cpp_execution()
+
+        # DSL 策略因子引擎
+        self._use_factor_engine = use_factor_engine
+        self._factor_bridge: Any | None = None
+        if use_factor_engine:
+            self._init_factor_engine()
 
     def run(
         self,
@@ -118,7 +126,12 @@ class BacktestEngine:
             self._continue_backtest = False
             return
 
-        # 2. 构建多K线DataFrame供策略使用
+        # 2. DSL 策略: 使用 FactorEngineBridge 计算因子和信号
+        if self._factor_bridge is not None:
+            self._tick_dsl(market_event)
+            return
+
+        # 3. 传统策略: 构建多K线DataFrame供策略使用
         bar_dataframes: dict[str, pd.DataFrame] = {}
         for symbol in market_event.bar_data or {}:
             hist = self.data_handler.history(symbol, bars=30)
@@ -130,7 +143,7 @@ class BacktestEngine:
             self.portfolio.current_positions,
         )
 
-        # 3. 将策略输出的dict信号转为SignalEvent列表
+        # 4. 将策略输出的dict信号转为SignalEvent列表
         from .events import SignalEvent
         signals: list[SignalEvent] = []
         if isinstance(raw_signals, dict):
@@ -148,10 +161,10 @@ class BacktestEngine:
         if signals:
             self._logger.debug("产生信号: %s", [(s.symbol, s.direction) for s in signals])
 
-        # 4. 组合管理：信号 → 目标仓位 → 订单
+        # 5. 组合管理：信号 → 目标仓位 → 订单
         orders = self.portfolio.generate_orders(signals, market_event)
 
-        # 5. 模拟执行
+        # 6. 模拟执行
         if self._use_cpp_execution and self._order_adapter is not None:
             fills = self._execute_orders_cpp(orders, market_event)
         else:
@@ -193,6 +206,31 @@ class BacktestEngine:
             self._use_cpp_execution = False
             self._order_adapter = None
 
+    def _init_factor_engine(self) -> None:
+        """初始化 DSL 策略的 FactorEngineBridge.
+
+        仅当策略是 DSL 策略（声明了 Factor/SignalExpr）时才启用。
+        """
+        try:
+            from ..strategy.dsl import is_dsl_strategy
+            from ..strategy.factor_engine import FactorEngineBridge
+
+            if not is_dsl_strategy(self.strategy):
+                self._factor_bridge = None
+                return
+
+            self._factor_bridge = FactorEngineBridge(self.strategy)
+            self._factor_bridge.initialize()
+            self._logger.info(
+                "FactorEngineBridge 已启用: %d 因子, %d 信号, C++=%s",
+                len(self._factor_bridge._factors),
+                len(self._factor_bridge._signals),
+                self._factor_bridge.cpp_available,
+            )
+        except Exception as e:
+            self._logger.warning("FactorEngineBridge 初始化失败: %s", e)
+            self._factor_bridge = None
+
     def _execute_orders_cpp(
         self,
         orders: list,
@@ -233,6 +271,86 @@ class BacktestEngine:
                 ))
 
         return fills
+
+    def _tick_dsl(self, market_event: Any) -> None:
+        """DSL 策略的事件循环.
+
+        使用 FactorEngineBridge 计算因子和信号，
+        然后调用策略的 on_signal() 方法生成订单。
+        """
+        bar_data = market_event.bar_data or {}
+
+        # 1. 对每个标的计算因子和信号
+        from ..strategy.dsl import SignalContext
+        all_orders: list = []
+
+        for symbol, data in bar_data.items():
+            # 构建单根 K 线数据
+            bar: dict[str, float] = {}
+            if isinstance(data, dict):
+                bar = {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+            elif isinstance(data, pd.Series):
+                bar = {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+
+            if not bar:
+                continue
+
+            # 计算因子和信号
+            result = self._factor_bridge.on_bar(symbol, bar)
+
+            # 2. 调用策略的 on_signal() 回调
+            if hasattr(self.strategy, 'on_signal'):
+                price = bar.get('close', 0.0)
+                ctx = SignalContext(
+                    symbol=symbol,
+                    price=price,
+                    cash=self.portfolio.cash,
+                    position=0.0,
+                    timestamp=market_event.timestamp,
+                )
+
+                # 获取当前持仓
+                if symbol in self.portfolio.positions:
+                    ctx.position = float(self.portfolio.positions[symbol].quantity)
+
+                self.strategy.on_signal(ctx)
+
+                # 收集 on_signal 产生的订单
+                if ctx.orders:
+                    all_orders.extend(ctx.orders)
+
+        # 3. 将 DSL 订单转为 SignalEvent → OrderEvent
+        from .events import SignalEvent
+        signals: list[SignalEvent] = []
+        for order in all_orders:
+            direction = "BUY" if order.get("side") == "BUY" else "SELL"
+            signals.append(SignalEvent(
+                timestamp=market_event.timestamp,
+                symbol=order.get("symbol", ""),
+                direction=direction,
+                strength=1.0,
+            ))
+
+        if signals:
+            self._logger.debug("DSL 产生信号: %s", [(s.symbol, s.direction) for s in signals])
+
+        # 4. 组合管理：信号 → 目标仓位 → 订单
+        orders = self.portfolio.generate_orders(signals, market_event)
+
+        # 5. 模拟执行
+        if self._use_cpp_execution and self._order_adapter is not None:
+            fills = self._execute_orders_cpp(orders, market_event)
+        else:
+            fills = self.broker.execute_orders(orders, market_event)
+        self._fills.extend(fills)
+
+        if fills:
+            self._logger.info("成交: %s", [(f.symbol, f.direction, f.quantity, f.fill_price) for f in fills])
+
+        # 6. 更新持仓与净值
+        self.portfolio.update_from_fills(fills, market_event.timestamp)
+        self._update_market_value(market_event)
+        self.portfolio.record_snapshot(market_event.timestamp)
 
     def _update_market_value(self, market_event: MarketEvent) -> None:
         """用当前市价更新持仓市值."""

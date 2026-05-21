@@ -37,6 +37,21 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
 
     auto topo = dag->topological_sort();
 
+    // Build edge mapping: (to_node_id, to_port) → (from_node_id, from_port)
+    // This maps IR port names so factor inputs use the correct keys.
+    // E.g., for edge fast_ma.value → signal.fast, the signal node receives
+    // its dependency's output under key "fast" (the to_port), not "fast_ma" (the node name).
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+        node_input_edges;  // node_id → {to_port → from_node_id}
+
+    // Also track: from_node_id → output port name for value lookup
+    std::unordered_map<std::string, std::string> node_output_port;  // node_id → from_port (typically "value")
+
+    for (const auto& edge : graph.edges) {
+        node_input_edges[edge.to_node][edge.to_port] = edge.from_node;
+        node_output_port[edge.from_node] = edge.from_port;
+    }
+
     // Load kline data
     storage::TimeRange range{params.start_time, params.end_time};
     auto close_result = storage_.query_kline(params.symbol, params.kline_type,
@@ -109,10 +124,24 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
                 // Leaf node: use data bindings from graph
                 factor_input = input_data;
             } else {
-                for (auto dep_id : deps) {
-                    auto* dep_meta = factor_registry.get_meta(dep_id);
-                    if (dep_meta && factor_values.count(dep_meta->name)) {
-                        factor_input[dep_meta->name] = factor_values[dep_meta->name];
+                // Use IR edge port names as input keys.
+                // E.g., if edge says fast_ma.value → signal.fast,
+                // then input key is "fast" (to_port) and value is output of fast_ma.
+                auto edge_it = node_input_edges.find(meta->name);
+                if (edge_it != node_input_edges.end()) {
+                    for (const auto& [to_port, from_node_id] : edge_it->second) {
+                        auto val_it = factor_values.find(from_node_id);
+                        if (val_it != factor_values.end()) {
+                            factor_input[to_port] = val_it->second;
+                        }
+                    }
+                } else {
+                    // Fallback: use factor name as key
+                    for (auto dep_id : deps) {
+                        auto* dep_meta = factor_registry.get_meta(dep_id);
+                        if (dep_meta && factor_values.count(dep_meta->name)) {
+                            factor_input[dep_meta->name] = factor_values[dep_meta->name];
+                        }
                     }
                 }
             }

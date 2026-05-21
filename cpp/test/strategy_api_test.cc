@@ -275,3 +275,112 @@ TEST_F(StrategyApiTest, MethodNotAllowed) {
     auto resp = api_->handle_request("PATCH", "/api/strategies/1");
     EXPECT_EQ(resp.status_code, 405);
 }
+
+// ── 9. Batch backtest ──
+
+TEST_F(StrategyApiTest, BatchBacktest) {
+    auto graph_path = create_test_graph("batch_test");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"s1","graph_path":")" + graph_path + R"("})");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"s2","graph_path":")" + graph_path + R"("})");
+
+    auto resp = api_->handle_request("POST", "/api/strategies/batch-backtest",
+                                      R"({"strategy_ids":[1,2],"params":{"initial_cash":100000.0}})");
+    EXPECT_EQ(resp.status_code, 200);
+    EXPECT_NE(resp.body.find("\"results\""), std::string::npos);
+    EXPECT_NE(resp.body.find("\"strategy_id\":1"), std::string::npos);
+    EXPECT_NE(resp.body.find("\"strategy_id\":2"), std::string::npos);
+}
+
+TEST_F(StrategyApiTest, BatchBacktestEmptyIds) {
+    auto resp = api_->handle_request("POST", "/api/strategies/batch-backtest",
+                                      R"({"strategy_ids":[]})");
+    EXPECT_EQ(resp.status_code, 400);
+    EXPECT_NE(resp.body.find("\"error\""), std::string::npos);
+}
+
+TEST_F(StrategyApiTest, BatchBacktestSomeMissing) {
+    auto graph_path = create_test_graph("batch_missing");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"s1","graph_path":")" + graph_path + R"("})");
+
+    auto resp = api_->handle_request("POST", "/api/strategies/batch-backtest",
+                                      R"({"strategy_ids":[1,999]})");
+    EXPECT_EQ(resp.status_code, 200);
+    EXPECT_NE(resp.body.find("\"strategy_id\":1"), std::string::npos);
+    EXPECT_NE(resp.body.find("\"strategy_id\":999"), std::string::npos);
+    EXPECT_NE(resp.body.find("\"error\":\"Strategy not found\""), std::string::npos);
+}
+
+// ── 10. Backtest history ──
+
+TEST_F(StrategyApiTest, BacktestHistoryEmpty) {
+    auto graph_path = create_test_graph("hist_empty");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"test","graph_path":")" + graph_path + R"("})");
+
+    auto resp = api_->handle_request("GET", "/api/strategies/1/backtest-history");
+    EXPECT_EQ(resp.status_code, 200);
+    EXPECT_NE(resp.body.find("\"history\":[]"), std::string::npos);
+}
+
+TEST_F(StrategyApiTest, BacktestHistoryNotFound) {
+    auto resp = api_->handle_request("GET", "/api/strategies/999/backtest-history");
+    EXPECT_EQ(resp.status_code, 404);
+}
+
+TEST_F(StrategyApiTest, BacktestHistoryRecords) {
+    auto graph_path = create_test_graph("hist_records");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"test","graph_path":")" + graph_path + R"("})");
+
+    api_->handle_request("POST", "/api/strategies/1/backtest",
+                          R"({"initial_cash":100000.0})");
+    api_->handle_request("POST", "/api/strategies/1/backtest",
+                          R"({"initial_cash":200000.0})");
+
+    auto resp = api_->handle_request("GET", "/api/strategies/1/backtest-history");
+    EXPECT_EQ(resp.status_code, 200);
+    EXPECT_NE(resp.body.find("\"history\""), std::string::npos);
+    EXPECT_NE(resp.body.find("\"timestamp\""), std::string::npos);
+}
+
+// ── 11. Clone strategy ──
+
+TEST_F(StrategyApiTest, CloneStrategy) {
+    auto graph_path = create_test_graph("clone_test");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"original","graph_path":")" + graph_path + R"(","params":{"period":10.0}})");
+
+    auto resp = api_->handle_request("POST", "/api/strategies/1/clone");
+    EXPECT_EQ(resp.status_code, 201);
+    EXPECT_NE(resp.body.find("\"name\":\"original-copy\""), std::string::npos);
+    EXPECT_NE(resp.body.find("\"graph_path\":\"" + graph_path + "\""), std::string::npos);
+    EXPECT_NE(resp.body.find("\"period\""), std::string::npos);
+    EXPECT_NE(resp.body.find("\"status\":\"draft\""), std::string::npos);
+}
+
+TEST_F(StrategyApiTest, CloneStrategyNotFound) {
+    auto resp = api_->handle_request("POST", "/api/strategies/999/clone");
+    EXPECT_EQ(resp.status_code, 404);
+    EXPECT_NE(resp.body.find("\"error\""), std::string::npos);
+}
+
+TEST_F(StrategyApiTest, CloneStrategyIndependent) {
+    auto graph_path = create_test_graph("clone_indep");
+    api_->handle_request("POST", "/api/strategies",
+                          R"({"name":"src","graph_path":")" + graph_path + R"("})");
+
+    auto clone_resp = api_->handle_request("POST", "/api/strategies/1/clone");
+    EXPECT_EQ(clone_resp.status_code, 201);
+
+    // Delete original
+    api_->handle_request("DELETE", "/api/strategies/1");
+
+    // Clone should still exist
+    auto get_resp = api_->handle_request("GET", "/api/strategies/2");
+    EXPECT_EQ(get_resp.status_code, 200);
+    EXPECT_NE(get_resp.body.find("\"name\":\"src-copy\""), std::string::npos);
+}
+

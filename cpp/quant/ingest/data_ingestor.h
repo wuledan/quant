@@ -10,6 +10,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -87,6 +88,12 @@ public:
     // Directly ingest a kline without network I/O
     bool ingest_kline(const std::string& symbol, const KlineData& kline);
 
+    // ── Data parsing (public for testing) ──
+    // Parse a raw JSON message into KlineData
+    // Price fields: float → int64_t ×10000, or int → int64_t as-is
+    bool parse_kline(const char* data, size_t len,
+                     std::string& symbol, KlineData& kline);
+
 private:
     // ── Coroutine tasks ──
     CoTask<void> connect_loop();
@@ -110,6 +117,7 @@ private:
     DataSourceConfig config_;
 
     std::unique_ptr<network::TcpConnection> conn_;
+    mutable std::mutex conn_mutex_;  // Protects conn_ for stop()/coroutine access
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
 
