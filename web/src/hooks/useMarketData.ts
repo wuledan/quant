@@ -1,103 +1,74 @@
-import { useEffect, useRef, useCallback } from 'react';
-import { useMarketStore } from '../stores/marketStore';
-import { useWebSocket } from './useWebSocket';
-import { getKline, getDepth } from '../api/market';
+import { useState, useEffect, useCallback } from 'react';
 
-const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/v1/ws`;
-
-export function useMarketData(symbol: string) {
-  const klineData = useMarketStore((s) => s.klineData);
-  const orderBook = useMarketStore((s) => s.orderBook);
-  const ticker = useMarketStore((s) => s.ticker);
-  const loadingKline = useMarketStore((s) => s.loadingKline);
-  const loadingDepth = useMarketStore((s) => s.loadingDepth);
-  const klineError = useMarketStore((s) => s.klineError);
-  const depthError = useMarketStore((s) => s.depthError);
-
-  const fetchKline = useMarketStore((s) => s.fetchKline);
-  const fetchDepth = useMarketStore((s) => s.fetchDepth);
-  const setTicker = useMarketStore((s) => s.setTicker);
-  const setOrderBook = useMarketStore((s) => s.setOrderBook);
-  const updateKlineBar = useMarketStore((s) => s.updateKlineBar);
-
-  const { isConnected, lastMessage, subscribe } = useWebSocket(WS_URL, ['kline', 'trade']);
-
-  // Subscribe to kline channel when symbol changes
-  useEffect(() => {
-    if (symbol && isConnected) {
-      subscribe('kline');
-    }
-  }, [symbol, isConnected, subscribe]);
-
-  // Handle WebSocket messages
-  useEffect(() => {
-    if (!lastMessage) return;
-
-    const { channel, data } = lastMessage as { channel: string; data: Record<string, unknown> };
-
-    if (channel === 'kline' && data) {
-      if (data.symbol === symbol) {
-        if (data.close !== undefined) {
-          setTicker({
-            symbol: data.symbol as string,
-            price: data.close as number,
-            change: (data.change as number) ?? 0,
-            volume: (data.volume as number) ?? 0,
-            timestamp: Date.now(),
-          });
-        }
-        if (data.open !== undefined && data.high !== undefined) {
-          updateKlineBar({
-            timestamp: (data.timestamp as number) ?? Date.now(),
-            open: data.open as number,
-            high: data.high as number,
-            low: data.low as number,
-            close: data.close as number,
-            volume: (data.volume as number) ?? 0,
-          });
-        }
-      }
-    } else if (channel === 'trade' && data) {
-      if (data.symbol === symbol) {
-        setTicker({
-          symbol: data.symbol as string,
-          price: data.price as number,
-          change: (data.change as number) ?? 0,
-          volume: (data.volume as number) ?? 0,
-          timestamp: Date.now(),
-        });
-      }
-    }
-  }, [lastMessage, symbol, setTicker, updateKlineBar]);
-
-  // Initial data fetch via REST API
-  const initialFetchRef = useRef(false);
-  useEffect(() => {
-    if (!symbol) return;
-    fetchKline(symbol);
-    fetchDepth(symbol);
-    initialFetchRef.current = true;
-  }, [symbol, fetchKline, fetchDepth]);
-
-  // Periodic depth refresh (order book not pushed via WS yet)
-  const depthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  useEffect(() => {
-    if (!symbol) return;
-
-    depthIntervalRef.current = setInterval(() => {
-      fetchDepth(symbol);
-    }, 10000);
-
-    return () => {
-      if (depthIntervalRef.current !== null) {
-        clearInterval(depthIntervalRef.current);
-        depthIntervalRef.current = null;
-      }
-    };
-  }, [symbol, fetchDepth]);
-
-  const loading = loadingKline || loadingDepth;
-  const error = klineError || depthError;
-
-  return { klineData, orderBook, ticker, loading, error, wsConnected: isConnected };
+export interface KlineData {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
 }
+
+export interface MarketQuote {
+  symbol: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  volume: number;
+  timestamp: number;
+}
+
+interface UseMarketDataReturn {
+  quotes: MarketQuote[];
+  klineData: KlineData[];
+  loading: boolean;
+  error: string | null;
+  refresh: () => void;
+}
+
+// TODO: Replace mock data with real API calls when market data endpoint is available
+const MOCK_QUOTES: MarketQuote[] = [
+  { symbol: '000001.SZ', price: 12.34, change: 0.12, changePercent: 0.98, volume: 1234567, timestamp: Date.now() },
+  { symbol: '600519.SH', price: 1856.00, change: -12.50, changePercent: -0.67, volume: 89012, timestamp: Date.now() },
+  { symbol: '000858.SZ', price: 156.78, change: 2.34, changePercent: 1.52, volume: 345678, timestamp: Date.now() },
+];
+
+const MOCK_KLINE: KlineData[] = Array.from({ length: 30 }, (_, i) => ({
+  timestamp: Date.now() - (30 - i) * 86400000,
+  open: 12 + Math.random() * 2,
+  high: 13 + Math.random() * 2,
+  low: 11 + Math.random() * 2,
+  close: 12 + Math.random() * 2,
+  volume: Math.floor(Math.random() * 1000000),
+}));
+
+export const useMarketData = (): UseMarketDataReturn => {
+  const [quotes, setQuotes] = useState<MarketQuote[]>([]);
+  const [klineData, setKlineData] = useState<KlineData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchData = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    // Simulate API call
+    setTimeout(() => {
+      try {
+        setQuotes(MOCK_QUOTES);
+        setKlineData(MOCK_KLINE);
+        setLoading(false);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Unknown error');
+        setLoading(false);
+      }
+    }, 500);
+  }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  return { quotes, klineData, loading, error, refresh: fetchData };
+};
+
+export default useMarketData;

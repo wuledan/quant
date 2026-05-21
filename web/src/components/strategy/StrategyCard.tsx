@@ -9,10 +9,17 @@ import type { Strategy } from '../../api/strategy';
 const { Text } = Typography;
 
 const statusColors: Record<string, string> = {
-  active: 'green',
   draft: 'default',
-  archived: 'orange',
-  error: 'red',
+  active: 'green',
+  paused: 'orange',
+  deleted: 'red',
+};
+
+const statusLabels: Record<string, string> = {
+  draft: '草稿',
+  active: '运行中',
+  paused: '已暂停',
+  deleted: '已删除',
 };
 
 interface StrategyCardProps {
@@ -35,12 +42,12 @@ const StrategyCard: React.FC<StrategyCardProps> = ({ strategy, onClick }) => {
             {strategy.name}
           </Text>
           <Tag color={statusColors[strategy.status] || 'default'}>
-            {strategy.status}
+            {statusLabels[strategy.status] || strategy.status}
           </Tag>
         </div>
         <div>
           <Text type="secondary" style={{ fontSize: 13 }}>
-            Type: {strategy.type}
+            ID: {strategy.id}
           </Text>
         </div>
         <div>

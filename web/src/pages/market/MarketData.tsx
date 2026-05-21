@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { Card, Col, Row, Select, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input, Tag } from 'antd';
+import dayjs from 'dayjs';
+import { Card, Col, Row, Select, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons';
-import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
+import { createChart, CandlestickSeries } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
 
 const { Title, Text } = Typography;
@@ -89,7 +90,7 @@ const MarketData: React.FC = () => {
     fetchData(sym);
   };
 
-  const handleDateRangeChange = (dates: [moment.Moment, moment.Moment] | null) => {
+  const handleDateRangeChange = (dates: [dayjs.Dayjs | null, dayjs.Dayjs | null] | null) => {
     if (dates && dates[0] && dates[1]) {
       const range: [string, string] = [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')];
       setDateRange(range);

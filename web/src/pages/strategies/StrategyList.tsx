@@ -1,62 +1,112 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Table, Tag, Space, Typography, Input, Spin, Alert, Empty } from 'antd';
-import { PlusOutlined, SearchOutlined, PlayCircleOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Button, Table, Tag, Space, Typography, Input, Spin, Alert, Empty, Popconfirm, message } from 'antd';
+import {
+  PlusOutlined, SearchOutlined, PlayCircleOutlined, PauseCircleOutlined,
+  DeleteOutlined, BarChartOutlined, CopyOutlined, UploadOutlined,
+} from '@ant-design/icons';
 import type { Strategy } from '../../api/strategy';
 import { useStrategyStore } from '../../stores/strategyStore';
 
 const { Title } = Typography;
 
 const statusColor: Record<string, string> = {
-  running: 'processing',
-  stopped: 'default',
-  error: 'error',
-  completed: 'success',
+  draft: 'default',
+  active: 'processing',
+  paused: 'warning',
+  deleted: 'error',
 };
 
 const statusLabel: Record<string, string> = {
-  running: '运行中',
-  stopped: '已停止',
-  error: '异常',
-  completed: '已完成',
+  draft: '草稿',
+  active: '运行中',
+  paused: '已暂停',
+  deleted: '已删除',
 };
-
-const MOCK_STRATEGIES: Strategy[] = [
-  { id: 1, name: '均线交叉策略', type: 'trend', params: { fast: 5, slow: 20 }, status: 'running', created_at: '2026-05-10', updated_at: '2026-05-20' },
-  { id: 2, name: '动量选股策略', type: 'momentum', params: { window: 20, top_n: 10 }, status: 'stopped', created_at: '2026-04-15', updated_at: '2026-05-18' },
-  { id: 3, name: '均值回归策略', type: 'mean_reversion', params: { window: 30, std: 2 }, status: 'error', created_at: '2026-03-01', updated_at: '2026-05-19' },
-  { id: 4, name: 'Alpha因子选股', type: 'alpha', params: { factors: ['momentum', 'value', 'quality'] }, status: 'completed', created_at: '2026-01-10', updated_at: '2026-05-15' },
-];
 
 const StrategyList: React.FC = () => {
   const navigate = useNavigate();
-  const { strategies, loading, error, fetchStrategies, deleteStrategy, runStrategy } = useStrategyStore();
+  const {
+    strategies, loading, error,
+    fetchStrategies, deleteStrategy, activateStrategy, pauseStrategy, cloneStrategy,
+  } = useStrategyStore();
   const [search, setSearch] = useState('');
-  const [localData, setLocalData] = useState<Strategy[]>([]);
 
   useEffect(() => {
-    fetchStrategies().catch(() => {
-      setLocalData(MOCK_STRATEGIES);
-    });
-  }, []);
+    fetchStrategies();
+  }, [fetchStrategies]);
 
-  const displayData = strategies.length > 0 ? strategies : localData;
   const filtered = search
-    ? displayData.filter((s) => s.name.includes(search) || s.type.includes(search))
-    : displayData;
+    ? strategies.filter((s) => s.name.includes(search) || s.status.includes(search))
+    : strategies;
 
-  if (loading && displayData.length === 0) {
-    return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}><Spin size="large" tip="加载策略列表..."><div style={{ padding: 50 }} /></Spin></div>;
+  const handleActivate = async (id: number) => {
+    try {
+      await activateStrategy(id);
+      message.success('策略已激活');
+      fetchStrategies();
+    } catch {
+      message.error('激活失败');
+    }
+  };
+
+  const handlePause = async (id: number) => {
+    try {
+      await pauseStrategy(id);
+      message.success('策略已暂停');
+      fetchStrategies();
+    } catch {
+      message.error('暂停失败');
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      await deleteStrategy(id);
+      message.success('策略已删除');
+    } catch {
+      message.error('删除失败');
+    }
+  };
+
+  const handleClone = async (id: number) => {
+    try {
+      const cloned = await cloneStrategy(id);
+      message.success(`策略已克隆，新 ID: ${cloned.id}`);
+      fetchStrategies();
+    } catch {
+      message.error('克隆失败');
+    }
+  };
+
+  if (loading && strategies.length === 0) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 400 }}>
+        <Spin size="large" tip="加载策略列表..."><div style={{ padding: 50 }} /></Spin>
+      </div>
+    );
   }
 
-  if (error && displayData.length === 0) {
-    return <Alert message="加载失败" description={error} type="error" showIcon action={<Button onClick={() => window.location.reload()}>重试</Button>} />;
+  if (error && strategies.length === 0) {
+    return (
+      <Alert
+        message="加载失败"
+        description={error}
+        type="error"
+        showIcon
+        action={<Button onClick={() => fetchStrategies()}>重试</Button>}
+      />
+    );
   }
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    { title: '策略名称', dataIndex: 'name', key: 'name', render: (text: string, record: Strategy) => <a onClick={() => navigate(`/strategies/${record.id}`)}>{text}</a> },
-    { title: '类型', dataIndex: 'type', key: 'type', width: 140, render: (t: string) => <Tag>{t}</Tag> },
+    {
+      title: '策略名称', dataIndex: 'name', key: 'name',
+      render: (text: string, record: Strategy) => (
+        <a onClick={() => navigate(`/strategies/${record.id}`)}>{text}</a>
+      ),
+    },
     {
       title: '状态', dataIndex: 'status', key: 'status', width: 100,
       render: (s: string) => <Tag color={statusColor[s] ?? 'default'}>{statusLabel[s] ?? s}</Tag>,
@@ -64,12 +114,28 @@ const StrategyList: React.FC = () => {
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 120 },
     { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 120 },
     {
-      title: '操作', key: 'actions', width: 200,
+      title: '操作', key: 'actions', width: 280,
       render: (_: unknown, record: Strategy) => (
-        <Space>
-          <Button size="small" icon={<PlayCircleOutlined />} onClick={() => runStrategy(record.id).catch(() => {})}>运行</Button>
-          <Button size="small" icon={<EditOutlined />} onClick={() => navigate(`/strategies/${record.id}`)}>编辑</Button>
-          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => deleteStrategy(record.id).catch(() => {})}>删除</Button>
+        <Space size="small" wrap>
+          {record.status === 'draft' || record.status === 'paused' ? (
+            <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => handleActivate(record.id)}>
+              激活
+            </Button>
+          ) : null}
+          {record.status === 'active' ? (
+            <Button size="small" icon={<PauseCircleOutlined />} onClick={() => handlePause(record.id)}>
+              暂停
+            </Button>
+          ) : null}
+          <Button size="small" icon={<BarChartOutlined />} onClick={() => navigate(`/strategies/${record.id}`)}>
+            详情
+          </Button>
+          <Button size="small" icon={<CopyOutlined />} onClick={() => handleClone(record.id)}>
+            克隆
+          </Button>
+          <Popconfirm title="确定删除该策略？" onConfirm={() => handleDelete(record.id)} okText="删除" cancelText="取消">
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -79,11 +145,14 @@ const StrategyList: React.FC = () => {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 0 }}>
         <Title level={4} style={{ margin: 0 }}>策略管理</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/strategies/new')}>创建策略</Button>
+        <Space>
+          <Button icon={<UploadOutlined />} onClick={() => navigate('/strategies/upload')}>上传策略</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/strategies/new')}>创建策略</Button>
+        </Space>
       </div>
 
       <Input
-        placeholder="搜索策略名称或类型..."
+        placeholder="搜索策略名称或状态..."
         prefix={<SearchOutlined />}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -93,7 +162,7 @@ const StrategyList: React.FC = () => {
 
       {filtered.length === 0 ? (
         <Empty description={search ? '未找到匹配的策略' : '暂无策略，点击上方按钮创建'}>
-          {!search && <Button type="primary" onClick={() => navigate('/strategies/new')}>创建策略</Button>}
+          {!search && <Button type="primary" onClick={() => navigate('/strategies/upload')}>上传策略</Button>}
         </Empty>
       ) : (
         <Table

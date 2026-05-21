@@ -29,7 +29,6 @@ const Dashboard: React.FC = () => {
   const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [systemRunning, setSystemRunning] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
-  const [ws, setWs] = useState<WebSocket | null>(null);
 
   // Initial REST fetch for scheduler status
   const fetchStatus = async () => {
@@ -52,7 +51,6 @@ const Dashboard: React.FC = () => {
   // WebSocket for real-time system updates
   useEffect(() => {
     const socket = new WebSocket(WS_URL);
-    setWs(socket);
 
     socket.onopen = () => {
       setWsConnected(true);

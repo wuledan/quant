@@ -1,11 +1,14 @@
-type MessageCallback = (data: unknown) => void;
+type MessageCallback = (data: WsEnvelope) => void;
 type EventCallback = (event: Event) => void;
 
-export interface WebSocketMessage {
-  channel: string;
+/** WsEventBridge JSON envelope format */
+export interface WsEnvelope {
+  channel: WsChannel;
   data: unknown;
-  type: string;
+  ts: number;
 }
+
+export type WsChannel = 'kline' | 'factor' | 'order' | 'risk' | 'signal' | 'market';
 
 export class MarketWebSocket {
   private ws: WebSocket | null = null;
@@ -24,12 +27,15 @@ export class MarketWebSocket {
   private closeCallbacks: EventCallback[] = [];
   private errorCallbacks: EventCallback[] = [];
 
+  /** Default WS URL pointing to C++ WsEventBridge on :8080 */
+  static readonly DEFAULT_URL = 'ws://localhost:8080';
+
   get isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
-  connect(url: string): void {
-    this.url = url;
+  connect(url?: string): void {
+    this.url = url ?? MarketWebSocket.DEFAULT_URL;
     this.isManualDisconnect = false;
     this.reconnectAttempts = 0;
     this.createConnection();
@@ -117,7 +123,7 @@ export class MarketWebSocket {
 
     this.ws.onmessage = (event: MessageEvent) => {
       try {
-        const parsed = JSON.parse(event.data) as WebSocketMessage;
+        const parsed = JSON.parse(event.data) as WsEnvelope;
         this.messageCallbacks.forEach((cb) => cb(parsed));
       } catch {
         console.warn('[WS] Failed to parse message:', event.data);

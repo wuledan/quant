@@ -1,34 +1,40 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Typography, Form, Input, Select, Button, message, Alert } from 'antd';
+import { Card, Typography, Form, Input, Button, message, Alert } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
+import { useStrategyStore } from '../../stores/strategyStore';
 
-const { Title, Text } = Typography;
+const { Title } = Typography;
 const { TextArea } = Input;
-
-const STRATEGY_TYPES = [
-  { value: 'trend', label: '趋势策略' },
-  { value: 'momentum', label: '动量策略' },
-  { value: 'mean_reversion', label: '均值回归' },
-  { value: 'alpha', label: 'Alpha因子' },
-  { value: 'arbitrage', label: '套利策略' },
-  { value: 'machine_learning', label: '机器学习' },
-];
 
 const StrategyCreate: React.FC = () => {
   const navigate = useNavigate();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { createStrategy } = useStrategyStore();
 
-  const handleSubmit = async (values: Record<string, unknown>) => {
+  const handleSubmit = async (values: { name: string; graph_content?: string; params?: string }) => {
     setSubmitting(true);
     setError(null);
     try {
-      // Simulate API call
-      await new Promise((r) => setTimeout(r, 500));
-      message.success(`策略「${values.name}」创建成功`);
-      navigate('/strategies');
+      let params: Record<string, unknown> = {};
+      if (values.params) {
+        try {
+          params = JSON.parse(values.params);
+        } catch {
+          setError('策略参数 JSON 格式错误');
+          setSubmitting(false);
+          return;
+        }
+      }
+      const strategy = await createStrategy({
+        name: values.name,
+        graph_content: values.graph_content,
+        params,
+      });
+      message.success(`策略「${strategy.name}」创建成功`);
+      navigate(`/strategies/${strategy.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建失败');
     } finally {
@@ -50,22 +56,21 @@ const StrategyCreate: React.FC = () => {
           form={form}
           layout="vertical"
           onFinish={handleSubmit}
-          initialValues={{ type: 'trend' }}
         >
           <Form.Item name="name" label="策略名称" rules={[{ required: true, message: '请输入策略名称' }]}>
-            <Input placeholder="例如：双均线策略" />
+            <Input placeholder="例如：ma_cross" />
           </Form.Item>
 
-          <Form.Item name="type" label="策略类型" rules={[{ required: true }]}>
-            <Select options={STRATEGY_TYPES} />
-          </Form.Item>
-
-          <Form.Item name="description" label="策略描述">
-            <TextArea rows={3} placeholder="简要描述策略逻辑..." />
+          <Form.Item name="graph_content" label="Graph JSON 内容">
+            <TextArea
+              rows={8}
+              placeholder='{"nodes": [...], "edges": [...]}'
+              style={{ fontFamily: 'monospace' }}
+            />
           </Form.Item>
 
           <Form.Item name="params" label="策略参数 (JSON)">
-            <TextArea rows={6} placeholder='{"fast": 5, "slow": 20}' />
+            <TextArea rows={4} placeholder='{"fast": 5, "slow": 20}' style={{ fontFamily: 'monospace' }} />
           </Form.Item>
 
           <Button type="primary" htmlType="submit" loading={submitting}>创建策略</Button>

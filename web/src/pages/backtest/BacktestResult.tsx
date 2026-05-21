@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import { ArrowLeftOutlined } from '@ant-design/icons';
 import { createChart, LineSeries, AreaSeries } from 'lightweight-charts';
-import type { IChartApi, Time } from 'lightweight-charts';
+import type { Time } from 'lightweight-charts';
 
 const { Title, Text } = Typography;
 const API_BASE = '/api/v1';
@@ -330,7 +330,7 @@ const BacktestResult: React.FC = () => {
 
       {trades.length > 0 && (
         <>
-          <Divider orientation="left" plain>交易明细</Divider>
+          <Divider titlePlacement="left" plain>交易明细</Divider>
           <Table
             dataSource={trades}
             columns={tradeColumns}

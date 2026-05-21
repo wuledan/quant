@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import dayjs from 'dayjs';
 import { useNavigate } from 'react-router-dom';
-import { Card, Table, Button, Typography, Tag, Space, Form, Select, InputNumber, DatePicker, message, Row, Col, Spin, Progress } from 'antd';
+import { Card, Table, Button, Typography, Tag, Space, Form, Select, InputNumber, DatePicker, message, Spin, Progress } from 'antd';
 import { PlayCircleOutlined, BarChartOutlined, ReloadOutlined } from '@ant-design/icons';
 
 const { Title, Text } = Typography;
@@ -35,7 +36,7 @@ const Backtest: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [strategies, setStrategies] = useState<StrategyItem[]>([]);
   const [tasks, setTasks] = useState<BacktestTask[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading] = useState(false);
   const [pollingIds, setPollingIds] = useState<Set<string>>(new Set());
 
   const fetchStrategies = useCallback(async () => {
@@ -94,7 +95,7 @@ const Backtest: React.FC = () => {
   }, [pollingIds, fetchTasks]);
 
   const handleRun = async (values: Record<string, unknown>) => {
-    const dateRange = values.dateRange as unknown as [moment.Moment, moment.Moment];
+    const dateRange = values.dateRange as unknown as [dayjs.Dayjs, dayjs.Dayjs];
     if (!dateRange || dateRange.length < 2) {
       message.error('请选择回测日期范围');
       return;
@@ -103,7 +104,6 @@ const Backtest: React.FC = () => {
     setSubmitting(true);
     try {
       const stratId = values.strategy as string;
-      const strat = strategies.find(s => s.id === stratId);
       const res = await fetch(`${API_BASE}/backtest/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
