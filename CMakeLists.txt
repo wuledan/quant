@@ -519,6 +519,11 @@ add_executable(factor_dag_from_graph_test cpp/test/factor_dag_from_graph_test.cc
 target_link_libraries(factor_dag_from_graph_test PRIVATE quant_factor quant_ir GTest::gtest_main)
 add_test(NAME factor_dag_from_graph_test COMMAND factor_dag_from_graph_test)
 
+# ── End-to-end integration test ──
+add_executable(e2e_integration_test cpp/test/e2e_integration_test.cc)
+target_link_libraries(e2e_integration_test PRIVATE quant_backtest quant_strategy quant_factor quant_ir quant_storage quant_event quant_infra GTest::gtest_main)
+add_test(NAME e2e_integration_test COMMAND e2e_integration_test)
+
 # ── Signal handler test ──
 add_executable(signal_handler_test cpp/test/signal_handler_test.cc)
 target_link_libraries(signal_handler_test PRIVATE quant_strategy GTest::gtest_main)
@@ -533,6 +538,18 @@ add_test(NAME backtest_test COMMAND backtest_test)
 add_executable(strategy_center_test cpp/test/strategy_center_test.cc)
 target_link_libraries(strategy_center_test PRIVATE quant_strategy GTest::gtest_main)
 add_test(NAME strategy_center_test COMMAND strategy_center_test)
+
+# ── API library ──
+add_library(quant_api
+    cpp/quant/api/strategy_api.cc
+)
+target_include_directories(quant_api PUBLIC ${CMAKE_SOURCE_DIR})
+target_link_libraries(quant_api PUBLIC quant_strategy quant_backtest quant_storage quant_event)
+
+# ── Strategy API test ──
+add_executable(strategy_api_test cpp/test/strategy_api_test.cc)
+target_link_libraries(strategy_api_test PRIVATE quant_api GTest::gtest_main)
+add_test(NAME strategy_api_test COMMAND strategy_api_test)
 
 # ── Service main ──
 add_executable(quant_service cpp/quant/service/service_main.cc)
