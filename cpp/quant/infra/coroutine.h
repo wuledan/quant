@@ -12,6 +12,7 @@
 #include <folly/coro/CurrentExecutor.h>
 #include "affinity_baton.h"
 #include "affinity_mutex.h"
+#include "affinity_shared_mutex.h"
 #include <folly/coro/BlockingWait.h>
 #include <folly/futures/Future.h>
 
@@ -25,6 +26,7 @@ using CoTask = folly::coro::Task<T>;
 using CoBaton = AffinityBaton;
 
 using CoMutex = AffinityMutex;
+using CoSharedMutex = AffinitySharedMutex;
 // CoSemaphore removed in Folly v2025; use BoundedQueue/UnboundedQueue instead if needed
 using AsyncScope = folly::coro::AsyncScope;
 

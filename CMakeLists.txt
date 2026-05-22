@@ -106,6 +106,7 @@ add_library(quant_infra
     cpp/quant/infra/time_utils.cc
     cpp/quant/infra/affinity_baton.cc
     cpp/quant/infra/affinity_mutex.cc
+    cpp/quant/infra/affinity_shared_mutex.cc
     cpp/quant/infra/timer_scheduler.cc
 )
 
@@ -425,6 +426,11 @@ add_test(NAME affinity_baton_test COMMAND affinity_baton_test)
 add_executable(affinity_mutex_test cpp/test/affinity_mutex_test.cc)
 target_link_libraries(affinity_mutex_test PRIVATE quant_infra GTest::gtest_main)
 add_test(NAME affinity_mutex_test COMMAND affinity_mutex_test)
+
+# ── AffinitySharedMutex test ──
+add_executable(affinity_shared_mutex_test cpp/test/affinity_shared_mutex_test.cc)
+target_link_libraries(affinity_shared_mutex_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME affinity_shared_mutex_test COMMAND affinity_shared_mutex_test)
 
 # ── Coroutine and thread-local stats tests ──
 add_executable(coroutine_test cpp/test/coroutine_test.cc)
