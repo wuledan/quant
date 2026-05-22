@@ -75,7 +75,7 @@ ComputeResult FactorComputer::increment(
     // Update cache with new input
     auto data_it = new_data.find(std::string(changed_input));
     if (data_it != new_data.end()) {
-        std::lock_guard lock(cache_mutex_);
+        auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
         cache_[std::string(changed_input)] = data_it->second;
     }
 
@@ -127,14 +127,14 @@ ComputeResult FactorComputer::increment(
 
 const std::vector<double>* FactorComputer::get_cached(
     std::string_view factor_name) const {
-    std::lock_guard lock(cache_mutex_);
+    auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
     auto it = cache_.find(std::string(factor_name));
     return it != cache_.end() ? &it->second : nullptr;
 }
 
 void FactorComputer::invalidate(std::string_view factor_name) {
     {
-        std::lock_guard lock(cache_mutex_);
+        auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
         cache_.erase(std::string(factor_name));
     }
     // Also invalidate dependents
@@ -144,7 +144,7 @@ void FactorComputer::invalidate(std::string_view factor_name) {
         for (auto dep_id : deps) {
             auto* meta = registry_->get_meta(dep_id);
             if (meta) {
-                std::lock_guard lock(cache_mutex_);
+                auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
                 cache_.erase(meta->name);
             }
         }
@@ -152,7 +152,7 @@ void FactorComputer::invalidate(std::string_view factor_name) {
 }
 
 void FactorComputer::clear_cache() {
-    std::lock_guard lock(cache_mutex_);
+    auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
     cache_.clear();
 }
 
@@ -194,7 +194,7 @@ ComputeResult FactorComputer::compute_factor_impl(
     for (const auto& input_name : meta->inputs) {
         // Check cache first (scoped lock to avoid deadlock on recursive call)
         {
-            std::lock_guard lock(cache_mutex_);
+            auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
             auto cache_it = cache_.find(input_name);
             if (cache_it != cache_.end()) {
                 resolved_inputs[input_name] = cache_it->second;
@@ -231,7 +231,7 @@ ComputeResult FactorComputer::compute_factor_impl(
         computed->insert(id);
         for (const auto& [k, v] : outputs) {
             {
-                std::lock_guard lock(cache_mutex_);
+                auto lock = infra::blockingWait(cache_mutex_.co_scoped_lock());
                 cache_[k] = v;
             }
             result.outputs[k] = v;

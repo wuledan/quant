@@ -9,6 +9,7 @@
 #include "cpp/quant/infra/coroutine.h"
 
 #include <gtest/gtest.h>
+#include <filesystem>
 #include <vector>
 
 using namespace quant::storage;
@@ -457,4 +458,103 @@ TEST(WriteBufferTest, WriteAndFlush) {
     EXPECT_EQ(result[0].timestamp, 1000);
 
     engine.shutdown();
+}
+
+// ── Dirty flush tests ──
+
+TEST(TimeSeriesStoreTest, CoFlushWritesToDisk) {
+    // co_flush should write accumulated rows to disk
+    std::filesystem::remove_all("/tmp/quant_test_coflush");
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_coflush",
+    });
+
+    // Write individual rows (co_store_kline now accumulates in pending_disk_)
+    blockingWait(store.co_store_kline("000001", 1, make_row(1000, 10.0)));
+    blockingWait(store.co_store_kline("000001", 1, make_row(2000, 20.0)));
+    blockingWait(store.co_store_kline("000001", 1, make_row(3000, 30.0)));
+
+    EXPECT_GT(store.pending_disk_rows(), 0u);
+
+    // Flush to disk
+    blockingWait(store.co_flush());
+
+    EXPECT_EQ(store.pending_disk_rows(), 0u);
+
+    // Create new store pointing to same dir — should read from disk
+    TimeSeriesStore store2(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_coflush",
+    });
+
+    auto result = blockingWait(store2.co_query_kline("000001", 1, 1000, 3000));
+    ASSERT_EQ(result.size(), 3u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[2].timestamp, 3000);
+}
+
+TEST(TimeSeriesStoreTest, CoFlushBatchAccumulation) {
+    // Batch writes also accumulate and get flushed
+    std::filesystem::remove_all("/tmp/quant_test_flush_batch");
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_flush_batch",
+    });
+
+    auto rows = make_rows(1000, 100);
+    blockingWait(store.co_store_kline_batch("000001", 1, rows));
+
+    EXPECT_EQ(store.pending_disk_rows(), 100u);
+
+    blockingWait(store.co_flush());
+
+    EXPECT_EQ(store.pending_disk_rows(), 0u);
+
+    TimeSeriesStore store2(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_flush_batch",
+    });
+
+    auto result = blockingWait(store2.co_query_kline("000001", 1, 1000, 1099));
+    ASSERT_EQ(result.size(), 100u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[99].timestamp, 1099);
+}
+
+TEST(StorageEngineTest, DirtyFlushViaStore) {
+    // StorageEngine accumulates writes in store; shutdown flushes to disk;
+    // reopen and query via read-through
+    std::filesystem::remove_all("/tmp/quant_test_dirty_flush");
+    StorageEngine engine(StorageEngine::Options{
+        .cache_budget_mb = 64,
+        .data_dir = "/tmp/quant_test_dirty_flush",
+    });
+    engine.start();
+
+    // Write via coroutine API — routes through store for accumulation
+    blockingWait(engine.co_store_kline("000001", 1, make_row(1000, 10.0)));
+    blockingWait(engine.co_store_kline("000001", 1, make_row(2000, 20.0)));
+
+    // Data should be in cache
+    auto cached = blockingWait(engine.co_query_kline("000001", 1, 0, 9999));
+    ASSERT_EQ(cached.size(), 2u);
+
+    // Close the engine — this flushes stores_ to disk
+    engine.shutdown();
+
+    // Reopen with a new engine pointing to same data_dir
+    StorageEngine engine2(StorageEngine::Options{
+        .cache_budget_mb = 64,
+        .data_dir = "/tmp/quant_test_dirty_flush",
+    });
+    engine2.start();
+
+    // Query via coroutine — should trigger read-through from disk
+    auto result = blockingWait(engine2.co_query_kline("000001", 1, 0, 9999));
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[1].timestamp, 2000);
+
+    engine2.shutdown();
 }

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <memory>
+#include <atomic>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -56,12 +57,21 @@ public:
     WriteBuffer* write_buffer() noexcept;
     void close();
 
+    // ── Dirty flush (periodic persistence) ──
+    void start_dirty_flush(folly::Executor* executor);
+    void stop_dirty_flush();
+
 private:
     Options opts_;
     std::unique_ptr<TimeSeriesCache> cache_;
     std::unique_ptr<WriteBuffer> write_buffer_;
     std::unordered_map<std::string, std::unique_ptr<TimeSeriesStore>> stores_;
     bool started_ = false;
+
+    folly::coro::AsyncScope flush_scope_;
+    std::atomic<bool> stopped_{false};
+
+    folly::coro::Task<void> dirty_flush_loop();
 };
 
 }  // namespace quant::storage

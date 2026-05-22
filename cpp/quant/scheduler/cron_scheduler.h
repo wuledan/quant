@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -15,6 +14,7 @@
 
 #include <folly/CancellationToken.h>
 
+#include "cpp/quant/infra/affinity_mutex.h"
 #include "coroutine.h"
 
 namespace quant::infra {
@@ -74,11 +74,10 @@ public:
 
 private:
     void tick();
-    quant::infra::CoTask<void> tick_async();
 
     std::atomic<bool> running_{false};
     std::unique_ptr<std::thread> scheduler_thread_;
-    mutable std::mutex mutex_;
+    mutable infra::AffinityMutex mutex_;
     std::unordered_map<uint64_t, CronJob> jobs_;
     uint64_t next_job_id_{1};
     CronSchedulerConfig config_;

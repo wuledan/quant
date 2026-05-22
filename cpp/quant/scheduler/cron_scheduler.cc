@@ -16,7 +16,7 @@ CronScheduler::~CronScheduler() { stop(); }
 
 uint64_t CronScheduler::add_job(std::string name, std::string cron_expression,
                                   std::function<void()> action) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     uint64_t id = next_job_id_++;
     CronJob job;
     job.id = id;
@@ -31,12 +31,12 @@ uint64_t CronScheduler::add_job(std::string name, std::string cron_expression,
 }
 
 bool CronScheduler::remove_job(uint64_t job_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     return jobs_.erase(job_id) > 0;
 }
 
 void CronScheduler::enable_job(uint64_t job_id, bool enabled) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = jobs_.find(job_id);
     if (it != jobs_.end()) it->second.enabled = enabled;
 }
@@ -68,7 +68,7 @@ void CronScheduler::tick() {
     auto now = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     for (auto& [id, job] : jobs_) {
         if (!job.enabled) continue;
         if (now >= job.next_run) {
@@ -103,7 +103,7 @@ CronScheduler::start_async(
 }
 
 std::vector<CronJob> CronScheduler::list_jobs() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     std::vector<CronJob> result;
     for (const auto& [id, job] : jobs_) {
         result.push_back(job);

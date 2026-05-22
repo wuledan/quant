@@ -184,6 +184,19 @@ std::vector<KlineRow> TimeSeriesStore::query_kline(const std::string& symbol,
 CoTask<StoreStatus> TimeSeriesStore::co_store_kline(
     const std::string& symbol, uint8_t data_type, const KlineRow& row) {
     co_await cache_->co_append(symbol, data_type, row);
+
+    // Accumulate for disk flush (periodic or threshold-based)
+    std::string key = pending_key(symbol, data_type);
+    auto& batch = pending_disk_[key];
+    if (batch.rows.empty()) {
+        batch.min_ts = row.timestamp;
+        batch.max_ts = row.timestamp;
+    } else {
+        batch.min_ts = std::min(batch.min_ts, row.timestamp);
+        batch.max_ts = std::max(batch.max_ts, row.timestamp);
+    }
+    batch.rows.push_back(row);
+
     co_return StoreStatus::kOk;
 }
 
@@ -274,6 +287,19 @@ CoTask<std::vector<KlineRow>> TimeSeriesStore::co_query_kline(
 StoreStatus TimeSeriesStore::flush() {
     disk_->flush();
     return StoreStatus::kOk;
+}
+
+CoTask<void> TimeSeriesStore::co_flush() {
+    for (auto& [key, batch] : pending_disk_) {
+        if (batch.rows.empty()) continue;
+        auto sep = key.find('\0');
+        if (sep == std::string::npos) continue;
+        std::string symbol = key.substr(0, sep);
+        uint8_t data_type = static_cast<uint8_t>(key[sep + 1]);
+        co_await flush_to_disk(symbol, data_type, batch);
+    }
+    pending_disk_.clear();
+    disk_->flush();
 }
 
 StoreStatus TimeSeriesStore::close() {

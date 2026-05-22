@@ -2,12 +2,13 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
+#include "cpp/quant/infra/affinity_mutex.h"
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/factor/factor_dag.h"
 #include "cpp/quant/factor/factor_registry.h"
 
@@ -67,7 +68,7 @@ private:
     std::unique_ptr<FactorRegistry> registry_;
     std::unique_ptr<FactorDAG> dag_;
     std::unordered_map<std::string, std::vector<double>> cache_;
-    mutable std::mutex cache_mutex_;  // protects cache_ for concurrent access
+    mutable infra::AffinityMutex cache_mutex_;  // protects cache_ for concurrent access
 };
 
 }  // namespace quant::factor

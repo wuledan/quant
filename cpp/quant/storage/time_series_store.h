@@ -53,6 +53,9 @@ public:
     CoTask<std::vector<KlineRow>> co_query_kline(const std::string& symbol, uint8_t data_type,
                                                   int64_t start_ts, int64_t end_ts);
 
+    // Flush all pending accumulated rows to disk
+    CoTask<void> co_flush();
+
     // ── Access ──
     TimeSeriesCache& cache() noexcept { return *cache_; }
     DiskPersistence& disk() noexcept { return *disk_; }
