@@ -6,9 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -20,6 +18,7 @@
 #include "config_source.h"
 #include "config_validator.h"
 #include "coroutine.h"
+#include "cpp/quant/infra/affinity_shared_mutex.h"
 
 namespace quant::infra {
 
@@ -58,7 +57,7 @@ public:
     // ── Read (thread-safe, sync) ──
     template<typename T>
     std::optional<T> get(std::string_view key) const {
-        std::shared_lock lock(rw_mutex_);
+        auto lock = blockingWait(rw_mutex_.co_scoped_shared_lock());
         // Strategy > Module > Global
         std::string key_str(key);
         auto it = strategy_config_.find(key_str);
@@ -117,17 +116,15 @@ private:
     void reload_sources(
         std::vector<std::unique_ptr<ConfigSource>>& sources,
         std::map<std::string, ConfigValue>& config,
-        ConfigLevel level,
-        std::unique_lock<std::shared_mutex>& lock);
+        ConfigLevel level);
 
     void reload_sources(
         std::unordered_map<std::string,
             std::vector<std::unique_ptr<ConfigSource>>>& sources_map,
         std::map<std::string, ConfigValue>& config,
-        ConfigLevel level,
-        std::unique_lock<std::shared_mutex>& lock);
+        ConfigLevel level);
 
-    mutable std::shared_mutex rw_mutex_;
+    mutable infra::AffinitySharedMutex rw_mutex_;
     folly::coro::Mutex co_mutex_;
 
     std::map<std::string, ConfigValue> global_config_;

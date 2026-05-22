@@ -108,7 +108,7 @@ EventBus 发布/订阅模式，同步派发延迟 < 1μs（热路径零分配）
 
 ## 性能基准
 
-> **环境**: Ubuntu 24.04, Linux 6.17, x86_64 | AMD Ryzen 9 7950X (16C/32T, L3 64MB) | 96 GB DDR5 | GCC 14.2
+> **环境**: Ubuntu 24.04, Linux 6.17, x86_64 | Intel Xeon Platinum 8173M (2×28C/56T/112T, L3 77 MiB) | 96 GB DDR4 | GCC 14.2
 
 | 组件 | 吞吐量 | 延迟 |
 |------|--------|------|

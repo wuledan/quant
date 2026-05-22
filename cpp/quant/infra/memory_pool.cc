@@ -6,8 +6,10 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <new>
+
+#include "cpp/quant/infra/affinity_mutex.h"
+#include "cpp/quant/infra/coroutine.h"
 
 namespace quant::infra {
 
@@ -71,7 +73,7 @@ private:
 class CentralFreeList {
 public:
     void push(void* ptr, size_t size) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        auto lock = blockingWait(mutex_.co_scoped_lock());
         auto* node = static_cast<FreeNode*>(ptr);
         node->size = size;
         node->next = head_;
@@ -79,7 +81,7 @@ public:
     }
 
     void* pop(size_t min_size) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        auto lock = blockingWait(mutex_.co_scoped_lock());
         FreeNode** prev = &head_;
         FreeNode* curr = head_;
         while (curr) {
@@ -99,7 +101,7 @@ private:
         FreeNode* next;
     };
     FreeNode* head_{nullptr};
-    std::mutex mutex_;
+    infra::AffinityMutex mutex_;
 };
 
 // ── Thread-local cache ──
@@ -190,7 +192,7 @@ public:
 
             // Cache miss — try central free list
             {
-                std::lock_guard<std::mutex> lock(class_mutexes_[class_idx]);
+                auto lock = blockingWait(class_mutexes_[class_idx].co_scoped_lock());
                 ptr = small_free_lists_[class_idx]->pop();
             }
             if (ptr) {
@@ -320,7 +322,7 @@ private:
 
     SmallObjectConfig config_;
     std::array<std::unique_ptr<SizeClassFreeList>, kNumSizeClasses> small_free_lists_;
-    std::array<std::mutex, kNumSizeClasses> class_mutexes_;
+    std::array<infra::AffinityMutex, kNumSizeClasses> class_mutexes_;
     std::vector<char*> preallocated_blocks_;
     char* bump_block_ptr_ = nullptr;
     size_t bump_offset_ = 0;

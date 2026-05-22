@@ -558,3 +558,146 @@ TEST(StorageEngineTest, DirtyFlushViaStore) {
 
     engine2.shutdown();
 }
+
+// ── Compaction tests ──
+
+// Helper: write a small segment to a DiskPersistence
+static void write_small_segment(DiskPersistence& disk, const std::string& symbol,
+                                 uint8_t data_type, int64_t start_ts, int count) {
+    auto rows = make_rows(start_ts, count);
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+    disk.write_segment(symbol, data_type, blocks, start_ts, start_ts + count - 1);
+}
+
+TEST(DiskPersistenceTest, CompactMergesSmallSegments) {
+    std::filesystem::remove_all("/tmp/quant_test_compact");
+    {
+        DiskPersistence disk("/tmp/quant_test_compact");
+
+        // Write 3 small segments of 100 rows each, non-overlapping
+        write_small_segment(disk, "000001", 1, 1000, 100);
+        write_small_segment(disk, "000001", 1, 2000, 100);
+        write_small_segment(disk, "000001", 1, 3000, 100);
+
+        auto before = disk.list_segments("000001", 1);
+        EXPECT_EQ(before.size(), 3u);
+
+        // Compact — segments have 100 rows each, well below default 4096 threshold
+        size_t merged = disk.compact("000001", 1);
+        EXPECT_EQ(merged, 3u);
+
+        auto after = disk.list_segments("000001", 1);
+        EXPECT_EQ(after.size(), 1u);
+    }
+
+    // Reopen and verify merged data is readable
+    {
+        DiskPersistence disk("/tmp/quant_test_compact");
+        auto files = disk.list_segments("000001", 1);
+        ASSERT_EQ(files.size(), 1u);
+
+        auto blocks = disk.read_segment(files[0]);
+        ASSERT_FALSE(blocks.empty());
+
+        // Should have all 8 field blocks
+        EXPECT_EQ(blocks.size(), 8u);
+
+        // Verify total row count (300 rows, 3 segments × 100)
+        for (const auto& b : blocks) {
+            if (b.field() == DataField::kClose) {
+                EXPECT_EQ(b.row_count(), 300u);
+                break;
+            }
+        }
+    }
+}
+
+TEST(DiskPersistenceTest, CompactNoOpWhenNoSmallSegments) {
+    std::filesystem::remove_all("/tmp/quant_test_compact_nop");
+    DiskPersistence disk("/tmp/quant_test_compact_nop");
+
+    // Write one segment at threshold — shouldn't be compacted
+    write_small_segment(disk, "000001", 1, 1000, 5000);
+
+    size_t merged = disk.compact("000001", 1, 4096);
+    EXPECT_EQ(merged, 0u);  // single segment, > 4096 rows — no compaction needed
+
+    auto files = disk.list_segments("000001", 1);
+    EXPECT_EQ(files.size(), 1u);
+}
+
+TEST(DiskPersistenceTest, CompactNeedsAtLeastTwo) {
+    std::filesystem::remove_all("/tmp/quant_test_compact_one");
+    DiskPersistence disk("/tmp/quant_test_compact_one");
+
+    // Write a single small segment
+    write_small_segment(disk, "000001", 1, 1000, 100);
+
+    size_t merged = disk.compact("000001", 1);
+    EXPECT_EQ(merged, 0u);  // only 1 small segment, nothing to merge
+
+    auto files = disk.list_segments("000001", 1);
+    EXPECT_EQ(files.size(), 1u);
+}
+
+TEST(DiskPersistenceTest, CompactPreservesTimestampOrder) {
+    std::filesystem::remove_all("/tmp/quant_test_compact_order");
+    DiskPersistence disk("/tmp/quant_test_compact_order");
+
+    // Write segments out of order (by time) to verify compact sorts correctly
+    write_small_segment(disk, "000001", 1, 3000, 100);  // later
+    write_small_segment(disk, "000001", 1, 1000, 100);  // earlier
+    write_small_segment(disk, "000001", 1, 2000, 100);  // middle
+
+    disk.compact("000001", 1);
+
+    auto files = disk.list_segments("000001", 1);
+    ASSERT_EQ(files.size(), 1u);
+
+    auto blocks = disk.read_segment(files[0]);
+    ASSERT_FALSE(blocks.empty());
+
+    // Verify timestamps are sorted
+    std::vector<int64_t> timestamps;
+    for (const auto& b : blocks) {
+        if (b.field() == DataField::kTimestamp) {
+            timestamps.resize(b.row_count());
+            b.decompress(std::span<int64_t>(timestamps));
+            break;
+        }
+    }
+
+    ASSERT_EQ(timestamps.size(), 300u);
+    for (size_t i = 1; i < timestamps.size(); ++i) {
+        EXPECT_LT(timestamps[i - 1], timestamps[i]);
+    }
+}
+
+TEST(DiskPersistenceTest, CompactDeduplicatesOverlapping) {
+    std::filesystem::remove_all("/tmp/quant_test_compact_dedup");
+    DiskPersistence disk("/tmp/quant_test_compact_dedup");
+
+    // Write segments with overlap
+    disk.write_segment("000001", 1,
+        TimeSeriesStore::rows_to_column_blocks(make_rows(1000, 10)),
+        1000, 1009);
+    disk.write_segment("000001", 1,
+        TimeSeriesStore::rows_to_column_blocks(make_rows(1005, 10)),
+        1005, 1014);
+
+    size_t merged = disk.compact("000001", 1);
+    EXPECT_EQ(merged, 2u);
+
+    auto files = disk.list_segments("000001", 1);
+    ASSERT_EQ(files.size(), 1u);
+
+    auto blocks = disk.read_segment(files[0]);
+    ASSERT_FALSE(blocks.empty());
+
+    for (const auto& b : blocks) {
+        if (b.field() == DataField::kClose) {
+            EXPECT_EQ(b.row_count(), 15u);  // 1000-1014 = 15 unique timestamps
+            break;
+        }
+    }
+}

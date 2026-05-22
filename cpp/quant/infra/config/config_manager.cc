@@ -16,7 +16,7 @@ ConfigManager::~ConfigManager() {
 }
 
 bool ConfigManager::load_global(std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_lock());
     bool ok = source->load(global_config_);
     if (ok) {
         global_sources_.push_back(std::move(source));
@@ -26,7 +26,7 @@ bool ConfigManager::load_global(std::unique_ptr<ConfigSource> source) {
 
 bool ConfigManager::load_module(std::string_view module,
                                   std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_lock());
     bool ok = source->load(module_config_);
     if (ok) {
         module_sources_[std::string(module)].push_back(std::move(source));
@@ -36,7 +36,7 @@ bool ConfigManager::load_module(std::string_view module,
 
 bool ConfigManager::load_strategy(std::string_view strategy_id,
                                     std::unique_ptr<ConfigSource> source) {
-    std::unique_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_lock());
     bool ok = source->load(strategy_config_);
     if (ok) {
         strategy_sources_[std::string(strategy_id)].push_back(std::move(source));
@@ -45,48 +45,46 @@ bool ConfigManager::load_strategy(std::string_view strategy_id,
 }
 
 bool ConfigManager::set(std::string_view key, ConfigValue value, ConfigLevel level) {
-    std::unique_lock lock(rw_mutex_);
-    auto* target = &global_config_;
-    if (level == ConfigLevel::kModule) target = &module_config_;
-    else if (level == ConfigLevel::kStrategy) target = &strategy_config_;
+    ConfigChangeEvent event{.source = "runtime"};
+    {
+        auto lock = blockingWait(rw_mutex_.co_scoped_lock());
+        auto* target = &global_config_;
+        if (level == ConfigLevel::kModule) target = &module_config_;
+        else if (level == ConfigLevel::kStrategy) target = &strategy_config_;
 
-    auto it = target->find(std::string(key));
-    ConfigValue old_val;
-    if (it != target->end()) {
-        old_val = it->second;
+        auto it = target->find(std::string(key));
+        ConfigValue old_val;
+        if (it != target->end()) {
+            old_val = it->second;
+        }
+
+        (*target)[std::string(key)] = value;
+
+        event.key = std::string(key);
+        event.old_value = old_val;
+        event.new_value = value;
+        event.level = level;
     }
-
-    (*target)[std::string(key)] = value;
-
-    // Notify
-    ConfigChangeEvent event{
-        .key = std::string(key),
-        .old_value = old_val,
-        .new_value = value,
-        .level = level,
-        .source = "runtime",
-    };
-    lock.unlock();
     notify_change(event);
     return true;
 }
 
 uint64_t ConfigManager::subscribe(std::string_view key_pattern, ConfigCallback callback) {
-    std::unique_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_lock());
     uint64_t id = next_sub_id_++;
     subscriptions_.push_back({id, std::string(key_pattern), std::move(callback)});
     return id;
 }
 
 void ConfigManager::unsubscribe(uint64_t id) {
-    std::unique_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_lock());
     auto it = std::remove_if(subscriptions_.begin(), subscriptions_.end(),
         [id](const Subscription& s) { return s.id == id; });
     subscriptions_.erase(it, subscriptions_.end());
 }
 
 void ConfigManager::notify_change(const ConfigChangeEvent& event) {
-    std::shared_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_shared_lock());
     for (const auto& sub : subscriptions_) {
         if (sub.key_pattern == "*" || sub.key_pattern == event.key) {
             sub.callback(event);
@@ -111,25 +109,26 @@ void ConfigManager::hot_reload_loop() {
     while (hot_reload_enabled_.load()) {
         std::this_thread::sleep_for(poll_interval_);
 
-        std::unique_lock lock(rw_mutex_);
-        reload_sources(global_sources_, global_config_, ConfigLevel::kGlobal, lock);
-        reload_sources(module_sources_, module_config_, ConfigLevel::kModule, lock);
-        reload_sources(strategy_sources_, strategy_config_, ConfigLevel::kStrategy, lock);
+        reload_sources(global_sources_, global_config_, ConfigLevel::kGlobal);
+        reload_sources(module_sources_, module_config_, ConfigLevel::kModule);
+        reload_sources(strategy_sources_, strategy_config_, ConfigLevel::kStrategy);
     }
 }
 
 void ConfigManager::reload_sources(
     std::vector<std::unique_ptr<ConfigSource>>& sources,
     std::map<std::string, ConfigValue>& config,
-    ConfigLevel level,
-    std::unique_lock<std::shared_mutex>& lock) {
+    ConfigLevel level) {
     if (sources.empty()) return;
 
-    auto old_config = config;
-    for (auto& source : sources) {
-        source->load(config);
+    std::map<std::string, ConfigValue> old_config;
+    {
+        auto lock = blockingWait(rw_mutex_.co_scoped_lock());
+        old_config = config;
+        for (auto& source : sources) {
+            source->load(config);
+        }
     }
-    lock.unlock();
 
     // Notify new/modified keys
     for (const auto& [key, new_val] : config) {
@@ -146,25 +145,25 @@ void ConfigManager::reload_sources(
             notify_change({key, old_val, ConfigValue{}, level, "hot_reload"});
         }
     }
-
-    lock.lock();
 }
 
 void ConfigManager::reload_sources(
     std::unordered_map<std::string,
         std::vector<std::unique_ptr<ConfigSource>>>& sources_map,
     std::map<std::string, ConfigValue>& config,
-    ConfigLevel level,
-    std::unique_lock<std::shared_mutex>& lock) {
+    ConfigLevel level) {
     if (sources_map.empty()) return;
 
-    auto old_config = config;
-    for (auto& [key, sources] : sources_map) {
-        for (auto& source : sources) {
-            source->load(config);
+    std::map<std::string, ConfigValue> old_config;
+    {
+        auto lock = blockingWait(rw_mutex_.co_scoped_lock());
+        old_config = config;
+        for (auto& [key, sources] : sources_map) {
+            for (auto& source : sources) {
+                source->load(config);
+            }
         }
     }
-    lock.unlock();
 
     for (const auto& [key, new_val] : config) {
         auto old_it = old_config.find(key);
@@ -179,12 +178,10 @@ void ConfigManager::reload_sources(
             notify_change({key, old_val, ConfigValue{}, level, "hot_reload"});
         }
     }
-
-    lock.lock();
 }
 
 std::map<std::string, ConfigValue> ConfigManager::export_all() const {
-    std::shared_lock lock(rw_mutex_);
+    auto lock = blockingWait(rw_mutex_.co_scoped_shared_lock());
     std::map<std::string, ConfigValue> result = global_config_;
     // Module config overrides global
     for (const auto& [key, val] : module_config_) {

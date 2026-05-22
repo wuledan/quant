@@ -109,6 +109,14 @@ public:
     // Delete a segment file
     bool delete_segment(std::string_view filename);
 
+    // Merge small segment files for a given (symbol, data_type) into larger segments.
+    // Scans all segment files for this symbol+type via the index, reads segments
+    // whose blocks have fewer than min_rows_to_keep rows, and merges them into
+    // one segment file. Old files are deleted; the new file is added to the index.
+    // Returns the number of merged segment files, or 0 if no compaction was needed.
+    size_t compact(std::string_view symbol, uint8_t data_type,
+                   size_t min_rows_to_keep = 4096);
+
     // Flush / sync all pending writes
     void flush();
 

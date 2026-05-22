@@ -3,7 +3,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
+#include <numeric>
 #include <stdexcept>
+#include <vector>
 
 #ifdef _WIN32
 #include <io.h>
@@ -12,6 +15,7 @@
 #include <unistd.h>
 #endif
 
+#include "cpp/quant/event/events/kline_event.h"
 #include "cpp/quant/network/co_io.h"
 
 namespace quant::storage {
@@ -405,6 +409,202 @@ CoTask<std::vector<ColumnBlock>> DiskPersistence::co_read_segment(
 
     ::close(fd);
     co_return result;
+}
+
+// ── Compaction helpers (anonymous namespace) ──
+
+namespace {
+
+using KlineRow = event::KlineRow;
+
+// Decompress a vector of ColumnBlocks into a vector of KlineRow
+std::vector<KlineRow> blocks_to_rows(const std::vector<ColumnBlock>& blocks) {
+    if (blocks.empty()) return {};
+
+    size_t n = 0;
+    for (const auto& b : blocks) {
+        if (b.field() == DataField::kTimestamp) {
+            n = b.row_count();
+            break;
+        }
+    }
+    if (n == 0) return {};
+
+    std::vector<int64_t> timestamps(n), volume(n), amount(n);
+    std::vector<int32_t> open(n), high(n), low(n), close_src(n), vwap(n);
+
+    for (const auto& b : blocks) {
+        switch (b.field()) {
+            case DataField::kTimestamp:
+                b.decompress(std::span<int64_t>(timestamps));
+                break;
+            case DataField::kOpen:
+                b.decompress(std::span<int32_t>(open));
+                break;
+            case DataField::kHigh:
+                b.decompress(std::span<int32_t>(high));
+                break;
+            case DataField::kLow:
+                b.decompress(std::span<int32_t>(low));
+                break;
+            case DataField::kClose:
+                b.decompress(std::span<int32_t>(close_src));
+                break;
+            case DataField::kVwap:
+                b.decompress(std::span<int32_t>(vwap));
+                break;
+            case DataField::kVolume:
+                b.decompress(std::span<int64_t>(volume));
+                break;
+            case DataField::kAmount:
+                b.decompress(std::span<int64_t>(amount));
+                break;
+            default:
+                break;
+        }
+    }
+
+    std::vector<KlineRow> rows;
+    rows.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        KlineRow row;
+        row.timestamp = timestamps[i];
+        row.open_price = open[i];
+        row.high_price = high[i];
+        row.low_price = low[i];
+        row.close_price = close_src[i];
+        row.vwap = vwap[i];
+        row.volume = volume[i];
+        row.amount = amount[i];
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+// Compress a vector of KlineRow into 8 ColumnBlocks (inverse of blocks_to_rows)
+std::vector<ColumnBlock> rows_to_blocks(const std::vector<KlineRow>& rows) {
+    if (rows.empty()) return {};
+
+    const size_t n = rows.size();
+    std::vector<int64_t> timestamps(n), volume(n), amount(n);
+    std::vector<int32_t> open(n), high(n), low(n), close_src(n), vwap(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        timestamps[i] = rows[i].timestamp;
+        open[i]   = rows[i].open_price;
+        high[i]   = rows[i].high_price;
+        low[i]    = rows[i].low_price;
+        close_src[i] = rows[i].close_price;
+        vwap[i]   = rows[i].vwap;
+        volume[i] = rows[i].volume;
+        amount[i] = rows[i].amount;
+    }
+
+    int64_t min_ts = timestamps.front();
+    int64_t max_ts = timestamps.back();
+
+    std::vector<ColumnBlock> blocks;
+    blocks.reserve(8);
+    blocks.push_back(ColumnBlock::compress(DataField::kTimestamp, timestamps,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kOpen, open,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kHigh, high,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kLow, low,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kClose, close_src,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kVwap, vwap,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kVolume, volume,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    blocks.push_back(ColumnBlock::compress(DataField::kAmount, amount,
+                                           ColumnBlock::Codec::kDelta, min_ts, max_ts));
+    return blocks;
+}
+
+}  // anonymous namespace
+
+// ── Compaction ──
+
+size_t DiskPersistence::compact(std::string_view symbol, uint8_t data_type,
+                                 size_t min_rows_to_keep) {
+    // 1. Find all segments for this (symbol, data_type) via the index
+    auto metas = index_.query(symbol, data_type, DataField::kClose,
+                               INT64_MIN, INT64_MAX);
+    if (metas.empty()) return 0;
+
+    // 2. Group by file_path: file → row_count, min_ts, max_ts
+    struct FileInfo {
+        std::string file_path;
+        size_t row_count;
+        int64_t min_ts;
+        int64_t max_ts;
+    };
+    std::map<std::string, FileInfo> file_map;
+    for (const auto& m : metas) {
+        auto it = file_map.find(m.file_path);
+        if (it == file_map.end()) {
+            file_map[m.file_path] = {m.file_path, m.row_count, m.min_ts, m.max_ts};
+        } else {
+            it->second.min_ts = std::min(it->second.min_ts, m.min_ts);
+            it->second.max_ts = std::max(it->second.max_ts, m.max_ts);
+        }
+    }
+
+    // 3. Collect small files (each < min_rows_to_keep rows)
+    std::vector<FileInfo> small;
+    for (const auto& [fname, info] : file_map) {
+        if (info.row_count < min_rows_to_keep) {
+            small.push_back(info);
+        }
+    }
+
+    // Need at least 2 small files to merge
+    if (small.size() < 2) return 0;
+
+    // 4. Sort by min_ts for deterministic output
+    std::sort(small.begin(), small.end(),
+              [](const FileInfo& a, const FileInfo& b) { return a.min_ts < b.min_ts; });
+
+    // 5. Read all small segments and merge into one row vector
+    std::vector<KlineRow> merged_rows;
+    for (const auto& info : small) {
+        auto blocks = read_segment(info.file_path);
+        if (blocks.empty()) continue;
+        auto rows = blocks_to_rows(blocks);
+        for (auto& r : rows) {
+            merged_rows.push_back(std::move(r));
+        }
+    }
+
+    if (merged_rows.empty()) return 0;
+
+    // 6. Sort by timestamp and deduplicate
+    std::sort(merged_rows.begin(), merged_rows.end(),
+              [](const KlineRow& a, const KlineRow& b) { return a.timestamp < b.timestamp; });
+    auto last = std::unique(merged_rows.begin(), merged_rows.end(),
+                             [](const KlineRow& a, const KlineRow& b) {
+                                 return a.timestamp == b.timestamp;
+                             });
+    merged_rows.erase(last, merged_rows.end());
+
+    // 7. Delete old small segment files FIRST to avoid filename collision
+    //    (the new segment may share the same begin_ts as an old one)
+    size_t merged_count = 0;
+    for (const auto& info : small) {
+        delete_segment(info.file_path);
+        ++merged_count;
+    }
+
+    // 8. Write new merged segment
+    int64_t merged_min_ts = merged_rows.front().timestamp;
+    int64_t merged_max_ts = merged_rows.back().timestamp;
+    auto merged_blocks = rows_to_blocks(merged_rows);
+    write_segment(symbol, data_type, merged_blocks, merged_min_ts, merged_max_ts);
+
+    return merged_count;
 }
 
 }  // namespace quant::storage
