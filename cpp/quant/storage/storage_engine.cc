@@ -34,7 +34,11 @@ void StorageEngine::shutdown() {
 
 void StorageEngine::store_kline(const std::string& symbol, uint8_t data_type,
                                 const KlineRow& row) {
-    cache_->append(symbol, data_type, row);
+    if (write_buffer_) {
+        write_buffer_->write(symbol, data_type, row);
+    } else {
+        cache_->append(symbol, data_type, row);
+    }
 }
 
 void StorageEngine::store_kline_batch(const std::string& symbol, uint8_t data_type,
@@ -53,9 +57,15 @@ std::vector<KlineRow> StorageEngine::query_kline(const std::string& symbol,
 CoTask<void> StorageEngine::co_store_kline(const std::string& symbol,
                                            uint8_t data_type,
                                            const KlineRow& row) {
-    co_await cache_->co_append(symbol, data_type, row);
+    if (write_buffer_) {
+        co_await write_buffer_->co_write(symbol, data_type, row);
+    } else {
+        co_await cache_->co_append(symbol, data_type, row);
+    }
 }
 
+// co_store_kline_batch always goes to cache directly.
+// WriteBuffer::do_flush_locked calls this to avoid circular routing back to write_buffer.
 CoTask<void> StorageEngine::co_store_kline_batch(const std::string& symbol,
                                                   uint8_t data_type,
                                                   const std::vector<KlineRow>& rows) {

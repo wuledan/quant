@@ -2,6 +2,7 @@
 #include "cpp/quant/storage/time_series_store.h"
 
 #include <climits>
+#include <map>
 
 namespace quant::storage {
 
@@ -65,6 +66,74 @@ std::vector<ColumnBlock> TimeSeriesStore::rows_to_column_blocks(
     blocks.push_back(ColumnBlock::compress(DataField::kAmount, amount,
                                            ColumnBlock::Codec::kDelta, min_ts, max_ts));
     return blocks;
+}
+
+std::vector<KlineRow> TimeSeriesStore::blocks_to_rows(
+    const std::vector<ColumnBlock>& blocks) {
+    if (blocks.empty()) return {};
+
+    // Find timestamp block to determine row count
+    size_t n = 0;
+    for (const auto& b : blocks) {
+        if (b.field() == DataField::kTimestamp) {
+            n = b.row_count();
+            break;
+        }
+    }
+    if (n == 0) return {};
+
+    // Decompress each field into its own vector
+    std::vector<int64_t> timestamps(n);
+    std::vector<int32_t> open(n), high(n), low(n), close_src(n), vwap(n);
+    std::vector<int64_t> volume(n), amount(n);
+
+    for (const auto& b : blocks) {
+        switch (b.field()) {
+            case DataField::kTimestamp:
+                b.decompress(std::span<int64_t>(timestamps));
+                break;
+            case DataField::kOpen:
+                b.decompress(std::span<int32_t>(open));
+                break;
+            case DataField::kHigh:
+                b.decompress(std::span<int32_t>(high));
+                break;
+            case DataField::kLow:
+                b.decompress(std::span<int32_t>(low));
+                break;
+            case DataField::kClose:
+                b.decompress(std::span<int32_t>(close_src));
+                break;
+            case DataField::kVwap:
+                b.decompress(std::span<int32_t>(vwap));
+                break;
+            case DataField::kVolume:
+                b.decompress(std::span<int64_t>(volume));
+                break;
+            case DataField::kAmount:
+                b.decompress(std::span<int64_t>(amount));
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Assemble rows
+    std::vector<KlineRow> rows;
+    rows.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        KlineRow row;
+        row.timestamp = timestamps[i];
+        row.open_price = open[i];
+        row.high_price = high[i];
+        row.low_price = low[i];
+        row.close_price = close_src[i];
+        row.vwap = vwap[i];
+        row.volume = volume[i];
+        row.amount = amount[i];
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 CoTask<void> TimeSeriesStore::flush_to_disk(const std::string& symbol,
@@ -150,7 +219,56 @@ CoTask<StoreStatus> TimeSeriesStore::co_store_kline_batch(
 CoTask<std::vector<KlineRow>> TimeSeriesStore::co_query_kline(
     const std::string& symbol, uint8_t data_type,
     int64_t start_ts, int64_t end_ts) {
-    co_return co_await cache_->co_query(symbol, data_type, start_ts, end_ts);
+    // 1. Query cache first
+    auto cached = co_await cache_->co_query(symbol, data_type, start_ts, end_ts);
+    if (!cached.empty()) co_return cached;
+
+    // 2. Cache miss: query SegmentIndex for matching disk segments
+    auto metas = co_await disk_->index().co_query(symbol, data_type,
+        DataField::kClose, start_ts, end_ts);
+    if (metas.empty()) co_return {};
+
+    // 3. Collect unique segment filenames (each segment has multiple field entries)
+    std::vector<std::string> filenames;
+    {
+        std::string_view last;
+        for (const auto& m : metas) {
+            if (m.file_path != last) {
+                filenames.push_back(m.file_path);
+                last = m.file_path;
+            }
+        }
+    }
+
+    // 4. Read segments from disk, decompress, merge by timestamp (dedup across segments)
+    std::map<int64_t, KlineRow> merged;
+    for (const auto& fname : filenames) {
+        auto blocks = co_await disk_->co_read_segment(fname);
+        if (blocks.empty()) continue;
+
+        auto rows = blocks_to_rows(blocks);
+        for (auto& row : rows) {
+            merged[row.timestamp] = std::move(row);
+        }
+    }
+
+    if (merged.empty()) co_return {};
+
+    // 5. Extract time-range slice
+    std::vector<KlineRow> result;
+    auto lo = merged.lower_bound(start_ts);
+    auto hi = merged.upper_bound(end_ts);
+    for (auto it = lo; it != hi; ++it) {
+        result.push_back(it->second);
+    }
+
+    // 6. Backfill cache with DataSource::kBatchLoad
+    if (!result.empty()) {
+        co_await cache_->co_append_batch(symbol, data_type, result,
+                                          DataSource::kBatchLoad);
+    }
+
+    co_return result;
 }
 
 StoreStatus TimeSeriesStore::flush() {

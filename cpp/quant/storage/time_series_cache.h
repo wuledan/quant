@@ -53,9 +53,11 @@ public:
 
     // ── Coroutine API (preferred) ──
 
-    CoTask<void> co_append(std::string_view symbol, uint8_t data_type, KlineRow row);
+    CoTask<void> co_append(std::string_view symbol, uint8_t data_type, KlineRow row,
+                           DataSource source = DataSource::kRealtimeIngest);
     CoTask<void> co_append_batch(std::string_view symbol, uint8_t data_type,
-                                 std::vector<KlineRow> rows);
+                                 std::vector<KlineRow> rows,
+                                 DataSource source = DataSource::kRealtimeIngest);
     CoTask<std::vector<KlineRow>> co_query(std::string_view symbol, uint8_t data_type,
                                            int64_t start_ts, int64_t end_ts);
 

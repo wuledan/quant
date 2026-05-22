@@ -10,10 +10,10 @@
 #pragma once
 
 #include <atomic>
-#include <mutex>
 #include <string>
 #include <vector>
 
+#include "cpp/quant/infra/affinity_mutex.h"
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/network/tcp_connection.h"
 #include "cpp/quant/storage/storage_engine.h"
@@ -111,7 +111,7 @@ private:
     DataSourceConfig config_;
 
     std::unique_ptr<network::TcpConnection> conn_;
-    mutable std::mutex conn_mutex_;  // Protects conn_ for stop()/coroutine access
+    mutable infra::AffinityMutex conn_mutex_;  // Protects conn_ for stop()/coroutine access
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
 

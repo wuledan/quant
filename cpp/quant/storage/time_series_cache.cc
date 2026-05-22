@@ -27,7 +27,8 @@ size_t TimeSeriesCache::shard_index(std::string_view symbol, uint8_t data_type) 
 // ── Coroutine API ──
 
 CoTask<void> TimeSeriesCache::co_append(
-    std::string_view symbol, uint8_t data_type, KlineRow row) {
+    std::string_view symbol, uint8_t data_type, KlineRow row,
+    DataSource source) {
     auto idx = shard_index(symbol, data_type);
     auto& shard = *shards_[idx];
     auto lock = co_await shard.rwlock.co_scoped_lock();
@@ -42,6 +43,7 @@ CoTask<void> TimeSeriesCache::co_append(
                                });
     entry.rows.insert(it, std::move(row));
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, row.timestamp);
+    entry.meta.source = source;
 
     // Track memory: one more row of 48 bytes
     entry.meta.approx_bytes = entry.rows.size() * sizeof(KlineRow) + key.symbol.size();
@@ -52,7 +54,8 @@ CoTask<void> TimeSeriesCache::co_append(
 }
 
 CoTask<void> TimeSeriesCache::co_append_batch(
-    std::string_view symbol, uint8_t data_type, std::vector<KlineRow> rows) {
+    std::string_view symbol, uint8_t data_type, std::vector<KlineRow> rows,
+    DataSource source) {
     if (rows.empty()) co_return;
 
     auto idx = shard_index(symbol, data_type);
@@ -78,6 +81,7 @@ CoTask<void> TimeSeriesCache::co_append_batch(
         existing.insert(it, std::move(r));
     }
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, max_ts);
+    entry.meta.source = source;
 
     // Track memory: added rows * sizeof(KlineRow)
     size_t added_bytes = rows.size() * sizeof(KlineRow);

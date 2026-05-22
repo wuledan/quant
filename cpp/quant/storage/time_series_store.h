@@ -63,6 +63,10 @@ public:
     // Exposed for testing: current pending rows ready for disk flush
     size_t pending_disk_rows() const noexcept;
 
+    // Convert between KlineRow vectors and columnar block representation
+    static std::vector<ColumnBlock> rows_to_column_blocks(const std::vector<KlineRow>& rows);
+    static std::vector<KlineRow> blocks_to_rows(const std::vector<ColumnBlock>& blocks);
+
 private:
     static constexpr size_t kFlushThreshold = 8192;
 
@@ -72,9 +76,6 @@ private:
         int64_t min_ts = INT64_MAX;
         int64_t max_ts = INT64_MIN;
     };
-
-    // Convert a batch of KlineRow into 8 ColumnBlocks for segment write
-    static std::vector<ColumnBlock> rows_to_column_blocks(const std::vector<KlineRow>& rows);
 
     // Flush accumulated rows for a (symbol, data_type) to a disk segment
     CoTask<void> flush_to_disk(const std::string& symbol, uint8_t data_type,

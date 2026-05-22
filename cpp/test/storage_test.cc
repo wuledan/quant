@@ -226,6 +226,92 @@ TEST(TimeSeriesStoreTest, BatchStore) {
     ASSERT_EQ(result.size(), 5u);
 }
 
+TEST(TimeSeriesStoreTest, ReadThroughFromDisk) {
+    // Write data directly to disk (bypass cache), then query via coroutine API
+    // to trigger read-through
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_readthrough",
+    });
+
+    auto rows = make_rows(1000, 10);
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+    store.disk().write_segment("000001", 1, blocks, 1000, 1009);
+
+    auto result = blockingWait(store.co_query_kline("000001", 1, 1000, 1009));
+    ASSERT_EQ(result.size(), 10u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[9].timestamp, 1009);
+    EXPECT_EQ(result[0].close_price, 1000000);  // make_row(1000, 10.0) => price * 10000
+}
+
+TEST(TimeSeriesStoreTest, ReadThroughMergesSegments) {
+    // Write two overlapping segments, verify read-through merges and deduplicates
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_merge",
+    });
+
+    // Segment 1: ts 1000-1009 (10 rows)
+    auto rows1 = make_rows(1000, 10);
+    auto blocks1 = TimeSeriesStore::rows_to_column_blocks(rows1);
+    store.disk().write_segment("000001", 1, blocks1, 1000, 1009);
+
+    // Segment 2: ts 1005-1014 (10 rows, overlaps with segment 1 at 1005-1009)
+    auto rows2 = make_rows(1005, 10);
+    auto blocks2 = TimeSeriesStore::rows_to_column_blocks(rows2);
+    store.disk().write_segment("000001", 1, blocks2, 1005, 1014);
+
+    auto result = blockingWait(store.co_query_kline("000001", 1, 1000, 1014));
+    // 15 unique timestamps: 1000-1014
+    ASSERT_EQ(result.size(), 15u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[14].timestamp, 1014);
+}
+
+TEST(TimeSeriesStoreTest, ReadThroughBackfillsCache) {
+    // After read-through, subsequent queries should hit cache
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_backfill",
+    });
+
+    auto rows = make_rows(1000, 5);
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+    store.disk().write_segment("000001", 1, blocks, 1000, 1004);
+
+    // First query: read-through from disk
+    auto result1 = blockingWait(store.co_query_kline("000001", 1, 1000, 1004));
+    ASSERT_EQ(result1.size(), 5u);
+
+    // Second query: should hit cache (same result)
+    auto result2 = blockingWait(store.co_query_kline("000001", 1, 1000, 1004));
+    ASSERT_EQ(result2.size(), 5u);
+
+    // Third query: partial overlap should also hit cache
+    auto result3 = blockingWait(store.co_query_kline("000001", 1, 1002, 1004));
+    ASSERT_EQ(result3.size(), 3u);
+}
+
+TEST(TimeSeriesStoreTest, BlocksToRowsRoundTrip) {
+    // Verify blocks_to_rows is the inverse of rows_to_column_blocks
+    auto original = make_rows(1000, 10);
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(original);
+    auto recovered = TimeSeriesStore::blocks_to_rows(blocks);
+
+    ASSERT_EQ(recovered.size(), original.size());
+    for (size_t i = 0; i < original.size(); ++i) {
+        EXPECT_EQ(recovered[i].timestamp, original[i].timestamp);
+        EXPECT_EQ(recovered[i].open_price, original[i].open_price);
+        EXPECT_EQ(recovered[i].high_price, original[i].high_price);
+        EXPECT_EQ(recovered[i].low_price, original[i].low_price);
+        EXPECT_EQ(recovered[i].close_price, original[i].close_price);
+        EXPECT_EQ(recovered[i].vwap, original[i].vwap);
+        EXPECT_EQ(recovered[i].volume, original[i].volume);
+        EXPECT_EQ(recovered[i].amount, original[i].amount);
+    }
+}
+
 // ── StorageEngine tests ──
 
 TEST(StorageEngineTest, StoreAndQuery) {
@@ -275,6 +361,23 @@ TEST(StorageEngineTest, WriteBufferIntegration) {
     EXPECT_NE(engine.write_buffer(), nullptr);
 
     engine.start();
+
+    // Write via coroutine API — should route through WriteBuffer
+    auto row = make_row(1000, 10.0);
+    blockingWait(engine.co_store_kline("000001", 1, row));
+
+    // Data should NOT be in cache yet (still buffered in WriteBuffer)
+    auto before = engine.query_kline("000001", 1, 0, 9999);
+    EXPECT_TRUE(before.empty());
+
+    // Flush WriteBuffer
+    engine.write_buffer()->flush();
+
+    // Data should now be in cache
+    auto after = engine.query_kline("000001", 1, 0, 9999);
+    ASSERT_EQ(after.size(), 1u);
+    EXPECT_EQ(after[0].timestamp, 1000);
+
     engine.shutdown();
 }
 

@@ -6,8 +6,10 @@
 #include <concepts>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <vector>
+
+#include "cpp/quant/infra/affinity_mutex.h"
+#include "cpp/quant/infra/coroutine.h"
 
 namespace quant::infra {
 
@@ -46,7 +48,7 @@ public:
 
     // ── Acquire an object ──
     std::shared_ptr<T> acquire() {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
+        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
 
         // Check if we need to grow
         if (impl_->free_list_.empty()) {
@@ -104,7 +106,7 @@ public:
 
     // ── Warmup ──
     void warmup(size_t count) {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
+        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
         impl_->grow(count);
     }
 
@@ -119,7 +121,7 @@ public:
     };
 
     Stats stats() const noexcept {
-        std::lock_guard<std::mutex> lock(impl_->mutex_);
+        auto lock = blockingWait(impl_->mutex_.co_scoped_lock());
         Stats s;
         s.total_allocated = impl_->capacity_;
         s.total_in_use = impl_->in_use_.load(std::memory_order_relaxed);
@@ -154,7 +156,7 @@ private:
 
         // Return object to pool (called by shared_ptr deleter)
         void return_object(size_t idx) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            auto lock = blockingWait(mutex_.co_scoped_lock());
             free_list_.push_back(idx);
             in_use_.fetch_sub(1, std::memory_order_relaxed);
             stats_.release_count.fetch_add(1, std::memory_order_relaxed);
@@ -202,7 +204,7 @@ private:
         };
         AtomicStats stats_;
 
-        mutable std::mutex mutex_;
+        mutable infra::AffinityMutex mutex_;
     };
 
     std::shared_ptr<Impl> impl_;

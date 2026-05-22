@@ -131,7 +131,7 @@ CoTask<void> DataIngestor::start() {
 
     // Run the connect/receive/heartbeat coroutine loop.
     // The caller should schedule this Task on an executor (e.g. via
-    // blockingWait or co_withExecutor) for proper thread affinity.
+    // infra::blockingWait or co_withExecutor) for proper thread affinity.
     co_await connect_loop();
 
     running_.store(false, std::memory_order_release);
@@ -143,7 +143,7 @@ void DataIngestor::stop() {
     // Disconnect the socket so any in-flight co_recv/co_send returns
     // immediately, unblocking the coroutine loops.
     {
-        std::lock_guard<std::mutex> lock(conn_mutex_);
+        auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
         if (conn_) {
             conn_->disconnect();
             conn_.reset();
@@ -198,7 +198,7 @@ CoTask<void> DataIngestor::connect_loop() {
 
         // ── 4. Store the connection (under lock for stop()) ──
         {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
+            auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
             conn_ = std::move(conn);
         }
 
@@ -213,7 +213,7 @@ CoTask<void> DataIngestor::connect_loop() {
 
         // ── 6. Connection lost — clean up ──
         {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
+            auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
             if (conn_) {
                 conn_->disconnect();
                 conn_.reset();
@@ -246,7 +246,7 @@ CoTask<void> DataIngestor::receive_loop() {
         // ── Check connection ──
         network::TcpConnection* conn = nullptr;
         {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
+            auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
             conn = conn_.get();
         }
         if (!conn || !conn->is_connected()) {
@@ -341,7 +341,7 @@ CoTask<void> DataIngestor::heartbeat_loop() {
         // Check connection
         network::TcpConnection* conn = nullptr;
         {
-            std::lock_guard<std::mutex> lock(conn_mutex_);
+            auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
             conn = conn_.get();
         }
         if (!conn || !conn->is_connected()) {
@@ -477,7 +477,7 @@ bool DataIngestor::ingest_kline(const std::string& symbol,
 IngestorStats DataIngestor::stats() const noexcept {
     bool connected = false;
     {
-        std::lock_guard<std::mutex> lock(conn_mutex_);
+        auto lock = infra::blockingWait(conn_mutex_.co_scoped_lock());
         connected = conn_ && conn_->is_connected();
     }
 
