@@ -94,6 +94,18 @@
 |------|------|
 | [多级存储架构设计](docs/multi_tier_storage_design.md) | 三级存储、数据生命周期、etcd/MinIO/PostgreSQL 选型与交互 |
 | [策略 DSL 设计](docs/p1-t1-strategy-dsl-design.md) | Python DSL v2 → IR 编译 → C++ 执行的完整流程 |
+| [性能基准测试](docs/benchmark_report.md) | Executor/DAG/协程延迟与吞吐量数据 |
+
+## 性能基准
+
+> 测试环境: Linux 6.17, x86_64, GCC 12, 4 worker 线程 (详见 [benchmark_report.md](docs/benchmark_report.md))
+
+| 组件 | 吞吐量 | 延迟 |
+|------|--------|------|
+| WorkStealingExecutor (4W, 100K tasks) | 409K ops/s | ~2.4 us/task |
+| DAG 中等规模 (1000 tasks × 10 层) | 648K ops/s | 1.5 ms |
+| 空协程创建+执行 | 919K ops/s | ~1.09 us |
+| `co_await` 恢复 | — | ~242 ns |
 
 ## 快速开始
 
