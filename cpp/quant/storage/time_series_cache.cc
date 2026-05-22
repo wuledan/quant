@@ -16,7 +16,8 @@ TimeSeriesCache::TimeSeriesCache(size_t memory_budget_mb)
 
 void TimeSeriesCache::append(std::string_view symbol,
                                quant::event::DataType type,
-                               ColumnBlock block) {
+                               ColumnBlock block,
+                               DataSource source) {
     size_t idx = shard_index(symbol);
     auto& shard = *shards_[idx];
 
@@ -27,7 +28,9 @@ void TimeSeriesCache::append(std::string_view symbol,
 
     {
         std::unique_lock lock(shard.rwlock);
-        shard.columns[key].push_back(std::move(block));
+        auto& entry = shard.entries[key];
+        entry.blocks.push_back(std::move(block));
+        entry.meta.source = source;  // Set source on first append
         shard.last_access[key] = now;
         shard.memory_used += mem;
     }
@@ -59,11 +62,11 @@ std::vector<ColumnBlock> TimeSeriesCache::query(
         access_it->second = now;
     }
 
-    auto it = shard.columns.find(key);
-    if (it == shard.columns.end()) return {};
+    auto it = shard.entries.find(key);
+    if (it == shard.entries.end()) return {};
 
     std::vector<ColumnBlock> result;
-    for (const auto& block : it->second) {
+    for (const auto& block : it->second.blocks) {
         if (block.field() == field) {
             // Check time range overlap
             if (block.max_timestamp() >= range.begin_ts &&
@@ -83,13 +86,16 @@ void TimeSeriesCache::evict(std::string_view symbol, quant::event::DataType type
 
     {
         std::unique_lock lock(shard.rwlock);
-        auto it = shard.columns.find(key);
-        if (it != shard.columns.end()) {
-            size_t before = shard.memory_used;
-            shard.columns.erase(it);
+        auto it = shard.entries.find(key);
+        if (it != shard.entries.end()) {
+            size_t entry_mem = 0;
+            for (const auto& block : it->second.blocks) {
+                entry_mem += block_memory(block);
+            }
+            shard.entries.erase(it);
             shard.last_access.erase(key);
-            size_t freed = before - shard.memory_used;
-            total_memory_.fetch_sub(freed, std::memory_order_relaxed);
+            shard.memory_used -= entry_mem;
+            total_memory_.fetch_sub(entry_mem, std::memory_order_relaxed);
         }
     }
 }
@@ -99,7 +105,7 @@ void TimeSeriesCache::evict(size_t target_bytes) {
     struct EntryInfo {
         CacheKey key;
         uint64_t access_time;
-        size_t memory;
+        size_t entry_memory;
         size_t shard_idx;
     };
 
@@ -108,10 +114,14 @@ void TimeSeriesCache::evict(size_t target_bytes) {
     for (size_t i = 0; i < kShardCount; ++i) {
         auto& shard = *shards_[i];
         std::shared_lock lock(shard.rwlock);
-        for (const auto& [key, blocks] : shard.columns) {
+        for (const auto& [key, value] : shard.entries) {
             auto it = shard.last_access.find(key);
             uint64_t at = (it != shard.last_access.end()) ? it->second : 0;
-            entries.push_back(EntryInfo{key, at, shard.memory_used, i});
+            size_t mem = 0;
+            for (const auto& block : value.blocks) {
+                mem += block_memory(block);
+            }
+            entries.push_back(EntryInfo{key, at, mem, i});
         }
     }
 
@@ -129,15 +139,48 @@ void TimeSeriesCache::evict(size_t target_bytes) {
         auto& shard = *shards_[entry.shard_idx];
         std::unique_lock lock(shard.rwlock);
 
-        auto it = shard.columns.find(entry.key);
-        if (it == shard.columns.end()) continue;
+        auto it = shard.entries.find(entry.key);
+        if (it == shard.entries.end()) continue;
 
-        size_t before = shard.memory_used;
-        shard.columns.erase(it);
+        size_t entry_mem = 0;
+        for (const auto& block : it->second.blocks) {
+            entry_mem += block_memory(block);
+        }
+        shard.entries.erase(it);
         shard.last_access.erase(entry.key);
-        size_t freed = before - shard.memory_used;
-        current -= freed;
-        total_memory_.fetch_sub(freed, std::memory_order_relaxed);
+        shard.memory_used -= entry_mem;
+        current -= entry_mem;
+        total_memory_.fetch_sub(entry_mem, std::memory_order_relaxed);
+    }
+}
+
+CacheEntryMeta TimeSeriesCache::get_meta(std::string_view symbol,
+                                          quant::event::DataType type) const {
+    size_t idx = shard_index(symbol);
+    auto& shard = *shards_[idx];
+
+    CacheKey key{std::string(symbol), type};
+
+    std::shared_lock lock(shard.rwlock);
+    auto it = shard.entries.find(key);
+    if (it == shard.entries.end()) {
+        return CacheEntryMeta{};  // return default meta if not found
+    }
+    return it->second.meta;
+}
+
+void TimeSeriesCache::set_meta(std::string_view symbol,
+                                quant::event::DataType type,
+                                CacheEntryMeta meta) {
+    size_t idx = shard_index(symbol);
+    auto& shard = *shards_[idx];
+
+    CacheKey key{std::string(symbol), type};
+
+    std::unique_lock lock(shard.rwlock);
+    auto it = shard.entries.find(key);
+    if (it != shard.entries.end()) {
+        it->second.meta = meta;
     }
 }
 

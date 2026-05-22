@@ -16,14 +16,16 @@ TimeSeriesStore::~TimeSeriesStore() {
 }
 
 StoreStatus TimeSeriesStore::put(std::string_view symbol, uint8_t data_type,
-                                   ColumnBlock block) {
+                                   ColumnBlock block,
+                                   DataSource source) {
     if (closed_) return StoreStatus::kStorageFull;
     if (symbol.empty()) return StoreStatus::kInvalidArgument;
 
     // Write to cache
     cache_->append(symbol,
                    static_cast<quant::event::DataType>(data_type),
-                   std::move(block));
+                   std::move(block),
+                   source);
 
     // If cache is near full, flush oldest data to disk
     if (cache_->used_memory() > cache_->memory_budget() * 0.9) {

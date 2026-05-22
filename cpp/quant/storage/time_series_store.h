@@ -33,7 +33,8 @@ public:
     // Write a column block for a symbol+type
     // Hot path: writes to cache; may trigger disk flush on full cache
     StoreStatus put(std::string_view symbol, uint8_t data_type,
-                    ColumnBlock block);
+                    ColumnBlock block,
+                    DataSource source = DataSource::kRealtimeIngest);
 
     // Query blocks matching field + time range
     // Tries cache first, falls back to disk

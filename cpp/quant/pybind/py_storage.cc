@@ -53,6 +53,12 @@ void bind_storage(py::module_& m) {
         .value("IO_ERROR", StoreStatus::kIoError)
         .export_values();
 
+    // ── DataSource enum ──
+    py::enum_<DataSource>(m, "DataSource")
+        .value("REALTIME_INGEST", DataSource::kRealtimeIngest)
+        .value("REMOTE_LOAD", DataSource::kRemoteLoad)
+        .export_values();
+
     // ── ColumnBlock::Codec enum (must be before ColumnBlock for default args) ──
     py::enum_<ColumnBlock::Codec>(m, "Codec")
         .value("NONE", ColumnBlock::Codec::kNone)
@@ -173,7 +179,8 @@ void bind_storage(py::module_& m) {
              }),
              py::arg("cache_budget_mb"), py::arg("data_dir"))
         .def("put", &TimeSeriesStore::put,
-             py::arg("symbol"), py::arg("data_type"), py::arg("block"))
+             py::arg("symbol"), py::arg("data_type"), py::arg("block"),
+             py::arg("source") = DataSource::kRealtimeIngest)
         .def("query", &TimeSeriesStore::query,
              py::arg("symbol"), py::arg("data_type"),
              py::arg("field"), py::arg("range"))

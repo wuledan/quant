@@ -17,9 +17,28 @@
 
 namespace quant::storage {
 
+// ── Data source tracking for eviction logic ──
+enum class DataSource : uint8_t {
+    kRealtimeIngest = 0,  // Engine real-time pull, eviction must sync to disk
+    kRemoteLoad = 1,      // Loaded from remote, eviction just discards
+};
+
+// ── Per-entry metadata for cache entries ──
+struct CacheEntryMeta {
+    DataSource source = DataSource::kRealtimeIngest;
+    bool disk_synced = false;    // Whether flushed to disk (realtime uses)
+    bool remote_synced = false;  // Whether uploaded to remote (realtime uses)
+};
+
 struct TimeRange {
     int64_t begin_ts;  // inclusive, microseconds
     int64_t end_ts;    // inclusive
+};
+
+// ── Cache entry value: blocks + metadata ──
+struct CacheValue {
+    std::vector<ColumnBlock> blocks;
+    CacheEntryMeta meta;
 };
 
 class TimeSeriesCache {
@@ -32,7 +51,8 @@ public:
 
     void append(std::string_view symbol,
                 quant::event::DataType type,
-                ColumnBlock block);
+                ColumnBlock block,
+                DataSource source = DataSource::kRealtimeIngest);
 
     std::vector<ColumnBlock> query(std::string_view symbol,
                                     quant::event::DataType type,
@@ -48,6 +68,15 @@ public:
     size_t memory_usage() const noexcept { return total_memory_.load(std::memory_order_relaxed); }
     size_t memory_budget() const noexcept { return memory_budget_; }
     size_t shard_count() const noexcept { return kShardCount; }
+
+    // Get metadata for a cache entry (returns default meta if not found)
+    CacheEntryMeta get_meta(std::string_view symbol,
+                            quant::event::DataType type) const;
+
+    // Set metadata for a cache entry (no-op if entry doesn't exist)
+    void set_meta(std::string_view symbol,
+                  quant::event::DataType type,
+                  CacheEntryMeta meta);
 
 private:
     struct CacheKey {
@@ -67,7 +96,7 @@ private:
 
     struct Shard {
         mutable std::shared_mutex rwlock;
-        std::unordered_map<CacheKey, std::vector<ColumnBlock>, CacheKeyHash> columns;
+        std::unordered_map<CacheKey, CacheValue, CacheKeyHash> entries;
         std::unordered_map<CacheKey, uint64_t, CacheKeyHash> last_access;
         size_t memory_used = 0;
     };

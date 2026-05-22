@@ -302,6 +302,86 @@ TEST(TimeSeriesCacheTest, MultipleSymbols) {
     }
 }
 
+TEST(TimeSeriesCacheTest, DataSourceTracking) {
+    TimeSeriesCache cache(1);
+
+    // Write with default source (kRealtimeIngest)
+    std::vector<int64_t> data1 = {100, 200, 300};
+    auto block1 = ColumnBlock::compress(DataField::kOpen, data1,
+                                        ColumnBlock::Codec::kDelta, 1000, 3000);
+    cache.append("REALTIME", quant::event::DataType::kKline1Min, std::move(block1));
+
+    auto meta1 = cache.get_meta("REALTIME", quant::event::DataType::kKline1Min);
+    EXPECT_EQ(meta1.source, DataSource::kRealtimeIngest);
+    EXPECT_FALSE(meta1.disk_synced);
+    EXPECT_FALSE(meta1.remote_synced);
+
+    // Write with explicit kRemoteLoad source
+    std::vector<int64_t> data2 = {400, 500, 600};
+    auto block2 = ColumnBlock::compress(DataField::kOpen, data2,
+                                        ColumnBlock::Codec::kDelta, 4000, 6000);
+    cache.append("REMOTE", quant::event::DataType::kKline1Min, std::move(block2),
+                 DataSource::kRemoteLoad);
+
+    auto meta2 = cache.get_meta("REMOTE", quant::event::DataType::kKline1Min);
+    EXPECT_EQ(meta2.source, DataSource::kRemoteLoad);
+    EXPECT_FALSE(meta2.disk_synced);
+    EXPECT_FALSE(meta2.remote_synced);
+}
+
+TEST(TimeSeriesCacheTest, SetMeta) {
+    TimeSeriesCache cache(1);
+
+    std::vector<int64_t> data = {100, 200, 300};
+    auto block = ColumnBlock::compress(DataField::kOpen, data,
+                                        ColumnBlock::Codec::kDelta, 1000, 3000);
+    cache.append("META", quant::event::DataType::kKline1Min, std::move(block));
+
+    // Initially all false
+    auto meta = cache.get_meta("META", quant::event::DataType::kKline1Min);
+    EXPECT_FALSE(meta.disk_synced);
+    EXPECT_FALSE(meta.remote_synced);
+
+    // Set disk_synced = true
+    meta.disk_synced = true;
+    cache.set_meta("META", quant::event::DataType::kKline1Min, meta);
+
+    auto updated = cache.get_meta("META", quant::event::DataType::kKline1Min);
+    EXPECT_TRUE(updated.disk_synced);
+    EXPECT_FALSE(updated.remote_synced);
+
+    // Set remote_synced = true
+    updated.remote_synced = true;
+    cache.set_meta("META", quant::event::DataType::kKline1Min, updated);
+
+    auto final_meta = cache.get_meta("META", quant::event::DataType::kKline1Min);
+    EXPECT_TRUE(final_meta.disk_synced);
+    EXPECT_TRUE(final_meta.remote_synced);
+}
+
+TEST(TimeSeriesCacheTest, GetMetaNonExistent) {
+    TimeSeriesCache cache(1);
+
+    // Getting meta for non-existent entry should return default meta
+    auto meta = cache.get_meta("NOTFOUND", quant::event::DataType::kKline1Min);
+    EXPECT_EQ(meta.source, DataSource::kRealtimeIngest);
+    EXPECT_FALSE(meta.disk_synced);
+    EXPECT_FALSE(meta.remote_synced);
+}
+
+TEST(TimeSeriesCacheTest, SetMetaNonExistent) {
+    TimeSeriesCache cache(1);
+
+    // Setting meta for non-existent entry should be a no-op
+    CacheEntryMeta meta;
+    meta.disk_synced = true;
+    cache.set_meta("NOTFOUND", quant::event::DataType::kKline1Min, meta);
+
+    // Should still return default meta
+    auto result = cache.get_meta("NOTFOUND", quant::event::DataType::kKline1Min);
+    EXPECT_FALSE(result.disk_synced);
+}
+
 // ========================================================================
 // DiskPersistence tests
 // ========================================================================
@@ -544,6 +624,27 @@ TEST(StorageEngineTest, StoreKlineSingle) {
 
     auto status = engine.store_kline("AAPL", quant::event::DataType::kKline1Min, row);
     EXPECT_EQ(status, StoreStatus::kOk);
+}
+
+TEST(StorageEngineTest, StoreKlineMarksRealtimeIngest) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1700000000000000LL;
+    row.open_price = 10000;
+    row.close_price = 10300;
+    row.volume = 1000000;
+
+    auto status = engine.store_kline("REALTIME", quant::event::DataType::kKline1Min, row);
+    EXPECT_EQ(status, StoreStatus::kOk);
+
+    // Verify cache entry has kRealtimeIngest source
+    auto& cache = engine.store().cache();
+    auto meta = cache.get_meta("REALTIME", quant::event::DataType::kKline1Min);
+    EXPECT_EQ(meta.source, DataSource::kRealtimeIngest);
+    EXPECT_FALSE(meta.disk_synced);
+    EXPECT_FALSE(meta.remote_synced);
 }
 
 TEST(StorageEngineTest, StoreKlineBatch) {
