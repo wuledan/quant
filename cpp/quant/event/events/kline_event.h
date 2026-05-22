@@ -18,7 +18,8 @@ struct KlineRow {
     int32_t close_price;
     int64_t volume;
     int64_t amount;
-    int64_t vwap;
+    int32_t vwap;            // price * 10000 (consistent with OHLC)
+    int32_t _padding = 0;
 };
 static_assert(sizeof(KlineRow) == 48);
 #pragma pack(pop)

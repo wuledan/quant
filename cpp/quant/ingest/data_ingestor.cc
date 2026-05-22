@@ -21,7 +21,6 @@
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/network/global_executor.h"
 #include "cpp/quant/network/global_io.h"
-#include "cpp/quant/storage/column_block.h"
 
 namespace quant::ingest {
 
@@ -114,10 +113,10 @@ static bool price_is_float(const char* json, size_t len, const char* key) {
 // ────────────────────────────────────────────────────────────────
 
 DataIngestor::DataIngestor(
-    storage::TimeSeriesStore& store,
+    storage::StorageEngine& engine,
     event::EventBus& bus,
     DataSourceConfig config
-) : store_(store), bus_(bus), config_(std::move(config)) {}
+) : engine_(engine), bus_(bus), config_(std::move(config)) {}
 
 DataIngestor::~DataIngestor() {
     stop();
@@ -415,36 +414,20 @@ bool DataIngestor::parse_kline(const char* data, size_t len,
 bool DataIngestor::store_kline(const std::string& symbol,
                                 const KlineData& kline) {
     try {
-        using namespace quant::storage;
         constexpr uint8_t dtype = static_cast<uint8_t>(event::DataType::kKlineDay);
-        const int64_t ts = kline.timestamp;
 
-        // Compress each field as a single-row ColumnBlock
-        auto open_block = ColumnBlock::compress(
-            DataField::kOpen, std::span<const int64_t>(&kline.open, 1),
-            ColumnBlock::Codec::kDelta, ts, ts);
-        auto high_block = ColumnBlock::compress(
-            DataField::kHigh, std::span<const int64_t>(&kline.high, 1),
-            ColumnBlock::Codec::kDelta, ts, ts);
-        auto low_block = ColumnBlock::compress(
-            DataField::kLow, std::span<const int64_t>(&kline.low, 1),
-            ColumnBlock::Codec::kDelta, ts, ts);
-        auto close_block = ColumnBlock::compress(
-            DataField::kClose, std::span<const int64_t>(&kline.close, 1),
-            ColumnBlock::Codec::kDelta, ts, ts);
-        auto vol_block = ColumnBlock::compress(
-            DataField::kVolume, std::span<const int64_t>(&kline.volume, 1),
-            ColumnBlock::Codec::kDelta, ts, ts);
+        event::KlineRow row;
+        row.timestamp = kline.timestamp * 1000;  // ms → μs
+        row.open_price = static_cast<int32_t>(kline.open);
+        row.high_price = static_cast<int32_t>(kline.high);
+        row.low_price = static_cast<int32_t>(kline.low);
+        row.close_price = static_cast<int32_t>(kline.close);
+        row.volume = kline.volume;
+        row.amount = kline.amount;
+        row.vwap = 0;
 
-        auto s1 = store_.put(symbol, dtype, std::move(open_block));
-        auto s2 = store_.put(symbol, dtype, std::move(high_block));
-        auto s3 = store_.put(symbol, dtype, std::move(low_block));
-        auto s4 = store_.put(symbol, dtype, std::move(close_block));
-        auto s5 = store_.put(symbol, dtype, std::move(vol_block));
-
-        return s1 == StoreStatus::kOk && s2 == StoreStatus::kOk &&
-               s3 == StoreStatus::kOk && s4 == StoreStatus::kOk &&
-               s5 == StoreStatus::kOk;
+        engine_.store_kline(symbol, dtype, row);
+        return true;
     } catch (...) {
         return false;
     }

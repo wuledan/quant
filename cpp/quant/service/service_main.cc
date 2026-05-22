@@ -21,6 +21,8 @@
 #include "cpp/quant/api/strategy_api.h"
 #include "cpp/quant/backtest/backtest_runner.h"
 #include "cpp/quant/event/event_bus.h"
+#include "cpp/quant/infra/etcd_client.h"
+#include "cpp/quant/infra/strategy_watcher.h"
 #include "cpp/quant/ingest/data_ingestor.h"
 #include "cpp/quant/network/global_executor.h"
 #include "cpp/quant/network/http_server.h"
@@ -66,7 +68,7 @@ int main(int argc, char* argv[]) {
     storage::WriteBuffer::Options wb_opts;
     wb_opts.wal_opts = storage::WriteAheadLog::Options{"./data/wal", 64};
     wb_opts.flush_row_threshold = 8192;        // flush after 8K rows
-    wb_opts.flush_interval = std::chrono::seconds(5);  // or every 5 seconds
+    wb_opts.flush_interval = std::chrono::milliseconds(5000);  // or every 5 seconds
     wb_opts.enable_wal = true;
     auto write_buffer = std::make_unique<storage::WriteBuffer>(storage, wb_opts);
     std::cout << "[Service] WriteBuffer created (WAL=./data/wal, flush_threshold=8192, flush_interval=5s)\n";
@@ -74,6 +76,10 @@ int main(int argc, char* argv[]) {
     // Recover any uncommitted data from WAL (crash recovery)
     write_buffer->recover();
     std::cout << "[Service] WAL recovery completed\n";
+
+    // Start background periodic flush on the executor
+    write_buffer->start_background_flush(global_exec.executor());
+    std::cout << "[Service] Background flush started\n";
 
     // Attach WriteBuffer to StorageEngine
     storage.set_write_buffer(std::move(write_buffer));
@@ -100,6 +106,18 @@ int main(int argc, char* argv[]) {
     strategy::StrategyEngine strategy_engine(bus, storage);
     std::cout << "[Service] StrategyEngine created\n";
 
+    // ── 4.5 Create EtcdClient and StrategyWatcher ──
+    infra::EtcdClient etcd_client("http://127.0.0.1:2379");
+    infra::StrategyWatcher strategy_watcher(etcd_client, strategy_engine);
+    if (!etcd_client.is_available()) {
+        std::cerr << "[Service] WARNING: etcd is not available at "
+                  << "http://127.0.0.1:2379 — strategy/backtest config will not sync\n";
+    }
+    folly::coro::co_withExecutor(
+        global_exec.executor(),
+        strategy_watcher.start()).start().detach();
+    std::cout << "[Service] StrategyWatcher started (etcd endpoint=http://127.0.0.1:2379)\n";
+
     // ── 5. Create SchedulerService and start it ──
     scheduler::SchedulerService scheduler_service;
     scheduler_service.start();
@@ -115,7 +133,7 @@ int main(int argc, char* argv[]) {
     ingest_config.reconnect_delay_ms = 5000;
     ingest_config.max_reconnect_attempts = 10;
 
-    ingest::DataIngestor ingestor(storage.store(), bus, ingest_config);
+    ingest::DataIngestor ingestor(storage, bus, ingest_config);
     std::cout << "[Service] DataIngestor created\n";
 
     // ── 7. Create BacktestRunner and StrategyApi ──
@@ -175,6 +193,10 @@ int main(int argc, char* argv[]) {
 
     ws_server.stop();
     std::cout << "[Service] WebSocketServer stopped\n";
+
+    // Stop etcd watcher before shutting down strategy_engine dependencies
+    strategy_watcher.stop();
+    std::cout << "[Service] StrategyWatcher stopped\n";
 
     scheduler_service.stop();
     std::cout << "[Service] SchedulerService stopped\n";

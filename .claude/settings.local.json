@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Edit(*)",
+      "Write(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "TaskCreate",
+      "TaskUpdate",
+      "TaskList",
+      "TaskGet",
+      "Agent(*)",
+      "SendMessage",
+      "TeamCreate",
+      "ExitPlanMode",
+      "WebSearch",
+      "WebFetch"
+    ]
+  }
+}

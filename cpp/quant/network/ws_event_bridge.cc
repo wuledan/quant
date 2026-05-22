@@ -169,17 +169,18 @@ std::string WsEventBridge::serialize_kline(const event::Event& event) {
     double high  = static_cast<double>(kline_evt.kline.high_price)  / 10000.0;
     double low   = static_cast<double>(kline_evt.kline.low_price)   / 10000.0;
     double close = static_cast<double>(kline_evt.kline.close_price) / 10000.0;
+    double vwap  = static_cast<double>(kline_evt.kline.vwap)        / 10000.0;
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        R"({"symbol":"%s","kline_type":%u,"timestamp":%lld,"open":%.2f,"high":%.2f,"low":%.2f,"close":%.2f,"volume":%lld,"amount":%lld,"vwap":%lld})",
+        R"({"symbol":"%s","kline_type":%u,"timestamp":%lld,"open":%.2f,"high":%.2f,"low":%.2f,"close":%.2f,"volume":%lld,"amount":%lld,"vwap":%.2f})",
         kline_evt.symbol.c_str(),
         static_cast<unsigned>(kline_evt.kline_type),
         static_cast<long long>(kline_evt.kline.timestamp),
         open, high, low, close,
         static_cast<long long>(kline_evt.kline.volume),
         static_cast<long long>(kline_evt.kline.amount),
-        static_cast<long long>(kline_evt.kline.vwap));
+        vwap);
     return buf;
 }
 

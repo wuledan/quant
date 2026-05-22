@@ -102,7 +102,7 @@ protected:
             row.close_price = static_cast<int32_t>(std::round(price * 10000.0));
             row.volume      = 1'000'000 + i * 10'000;
             row.amount      = static_cast<int64_t>(std::round(price * 10000.0)) * 100;
-            row.vwap        = static_cast<int64_t>(std::round(price * 10000.0));
+            row.vwap        = static_cast<int32_t>(std::round(price * 10000.0));
             rows.push_back(row);
         }
 
@@ -209,7 +209,7 @@ protected:
             row.close_price = static_cast<int32_t>(std::round(price * 10000.0));
             row.volume      = 1'000'000 + i * 10'000;
             row.amount      = static_cast<int64_t>(std::round(price * 10000.0)) * 100;
-            row.vwap        = static_cast<int64_t>(std::round(price * 10000.0));
+            row.vwap        = static_cast<int32_t>(std::round(price * 10000.0));
             rows.push_back(row);
         }
 

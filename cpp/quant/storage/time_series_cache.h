@@ -1,119 +1,103 @@
-// time_series_cache.h — In-memory cache for time series data
-// 64-shard design with LRU eviction
+// time_series_cache.h — Sharded in-memory time-series cache
+//
+// Stores recent KlineRow entries for fast point queries and range scans.
+// Sharded by (symbol, data_type) hash for concurrent access.
+// Each shard protected by AffinitySharedMutex (thread-affine coroutine RW lock).
+//
+// Coroutine API: co_append, co_append_batch, co_query (preferred)
+// Sync API:      append, append_batch, query (blockingWait wrappers)
 #pragma once
 
-#include <array>
-#include <atomic>
 #include <cstdint>
-#include <memory>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <memory>
 
+#include "cpp/quant/infra/affinity_shared_mutex.h"
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/event/events/kline_event.h"
-#include "cpp/quant/storage/column_block.h"
 
 namespace quant::storage {
 
-// ── Data source tracking for eviction logic ──
+using infra::CoTask;
+using KlineRow = event::KlineRow;
+
+// How data entered the cache — used for eviction priority
 enum class DataSource : uint8_t {
-    kRealtimeIngest = 0,  // Engine real-time pull, eviction must sync to disk
-    kRemoteLoad = 1,      // Loaded from remote, eviction just discards
+    kRealtimeIngest = 0,   // live market data (highest priority, evict last)
+    kBatchLoad = 1,        // loaded from disk segment
+    kRemoteLoad = 2,       // loaded from remote (MinIO/Parquet)
+    kUnknown = 255,
 };
 
-// ── Per-entry metadata for cache entries ──
+// Per-entry metadata for eviction decisions
 struct CacheEntryMeta {
-    DataSource source = DataSource::kRealtimeIngest;
-    bool disk_synced = false;    // Whether flushed to disk (realtime uses)
-    bool remote_synced = false;  // Whether uploaded to remote (realtime uses)
-};
-
-struct TimeRange {
-    int64_t begin_ts;  // inclusive, microseconds
-    int64_t end_ts;    // inclusive
-};
-
-// ── Cache entry value: blocks + metadata ──
-struct CacheValue {
-    std::vector<ColumnBlock> blocks;
-    CacheEntryMeta meta;
+    DataSource source = DataSource::kUnknown;
+    int64_t last_access_ts = 0;    // monotonic timestamp of last read
+    size_t approx_bytes = 0;       // approximate memory footprint
 };
 
 class TimeSeriesCache {
 public:
-    explicit TimeSeriesCache(size_t memory_budget_mb);
-    ~TimeSeriesCache() = default;
+    struct Options {
+        size_t num_shards = 16;
+        size_t budget_mb = 256;
+    };
 
-    TimeSeriesCache(const TimeSeriesCache&) = delete;
-    TimeSeriesCache& operator=(const TimeSeriesCache&) = delete;
+    explicit TimeSeriesCache(Options opts);
 
-    void append(std::string_view symbol,
-                quant::event::DataType type,
-                ColumnBlock block,
-                DataSource source = DataSource::kRealtimeIngest);
+    // ── Coroutine API (preferred) ──
 
-    std::vector<ColumnBlock> query(std::string_view symbol,
-                                    quant::event::DataType type,
-                                    DataField field,
-                                    TimeRange range) const;
+    CoTask<void> co_append(std::string_view symbol, uint8_t data_type, KlineRow row);
+    CoTask<void> co_append_batch(std::string_view symbol, uint8_t data_type,
+                                 std::vector<KlineRow> rows);
+    CoTask<std::vector<KlineRow>> co_query(std::string_view symbol, uint8_t data_type,
+                                           int64_t start_ts, int64_t end_ts);
 
-    void evict(std::string_view symbol, quant::event::DataType type);
+    // ── Synchronous API (backward compatible) ──
 
-    // Evict least-recently-used entries until memory is under target_bytes
-    void evict(size_t target_bytes);
-
-    size_t used_memory() const noexcept { return total_memory_.load(std::memory_order_relaxed); }
-    size_t memory_usage() const noexcept { return total_memory_.load(std::memory_order_relaxed); }
-    size_t memory_budget() const noexcept { return memory_budget_; }
-    size_t shard_count() const noexcept { return kShardCount; }
-
-    // Get metadata for a cache entry (returns default meta if not found)
-    CacheEntryMeta get_meta(std::string_view symbol,
-                            quant::event::DataType type) const;
-
-    // Set metadata for a cache entry (no-op if entry doesn't exist)
-    void set_meta(std::string_view symbol,
-                  quant::event::DataType type,
-                  CacheEntryMeta meta);
+    void append(std::string_view symbol, uint8_t data_type, KlineRow row);
+    void append_batch(std::string_view symbol, uint8_t data_type,
+                      std::vector<KlineRow> rows);
+    std::vector<KlineRow> query(std::string_view symbol, uint8_t data_type,
+                                int64_t start_ts, int64_t end_ts);
 
 private:
-    struct CacheKey {
+    struct ShardKey {
         std::string symbol;
-        quant::event::DataType type;
-        bool operator==(const CacheKey& o) const {
-            return symbol == o.symbol && type == o.type;
+        uint8_t data_type;
+
+        bool operator==(const ShardKey& o) const {
+            return symbol == o.symbol && data_type == o.data_type;
         }
     };
 
-    struct CacheKeyHash {
-        size_t operator()(const CacheKey& k) const {
+    struct ShardKeyHash {
+        size_t operator()(const ShardKey& k) const {
             return std::hash<std::string>()(k.symbol) ^
-                   (std::hash<int>()(static_cast<int>(k.type)) << 16);
+                   (static_cast<size_t>(k.data_type) << 17);
         }
     };
 
-    struct Shard {
-        mutable std::shared_mutex rwlock;
-        std::unordered_map<CacheKey, CacheValue, CacheKeyHash> entries;
-        std::unordered_map<CacheKey, uint64_t, CacheKeyHash> last_access;
-        size_t memory_used = 0;
+    struct ShardEntry {
+        std::vector<KlineRow> rows;     // sorted by ts
+        CacheEntryMeta meta;
     };
 
-    size_t shard_index(std::string_view symbol) const {
-        return std::hash<std::string_view>()(symbol) % kShardCount;
-    }
+    // Shard: (symbol, data_type) → sorted KlineRow list
+    // AffinitySharedMutex is non-movable, so Shard is non-movable
+    struct Shard {
+        std::unordered_map<ShardKey, ShardEntry, ShardKeyHash> entries;
+        infra::AffinitySharedMutex rwlock;
+    };
 
-    static size_t block_memory(const ColumnBlock& block) {
-        return sizeof(ColumnBlock) + block.compressed_size();
-    }
+    size_t shard_index(std::string_view symbol, uint8_t data_type) const;
 
-    static constexpr size_t kShardCount = 64;
-
-    std::array<std::unique_ptr<Shard>, kShardCount> shards_;
-    std::atomic<size_t> total_memory_{0};
-    size_t memory_budget_;
+    Options opts_;
+    // unique_ptr because Shard (containing AffinitySharedMutex) is non-movable
+    std::vector<std::unique_ptr<Shard>> shards_;
 };
 
 }  // namespace quant::storage

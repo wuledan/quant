@@ -7,6 +7,8 @@
 #include <atomic>
 #include <string>
 
+#include "cpp/quant/storage/column_block.h"  // for KlineFreq
+
 namespace quant::event { struct KlineRow; }
 namespace quant::storage { class StorageEngine; }
 
@@ -25,7 +27,9 @@ public:
     // Load a single CSV file (may contain one or more symbols)
     // CSV header: symbol,date,open,high,low,close,volume,amount
     // Prices are float (×10000 conversion happens internally)
-    bool load_csv(const std::string& csv_path);
+    // freq: Kline frequency for the loaded data (default: daily)
+    bool load_csv(const std::string& csv_path,
+                  KlineFreq freq = KlineFreq::kDay);
 
     // Load all .csv files from a directory
     // Returns number of files successfully loaded

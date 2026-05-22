@@ -108,9 +108,12 @@ public:
         Waiter node;
 
         bool await_ready() const noexcept {
-            // Can acquire exclusive if state_ == 0 (no readers, no writers)
-            auto s = mutex.state_.load(std::memory_order_acquire);
-            return s == 0;
+            // Try to CAS state_ from 0 to kWriterLocked (fast uncontested path)
+            uint32_t expected = 0;
+            return mutex.state_.compare_exchange_strong(
+                expected, kWriterLocked,
+                std::memory_order_acquire,
+                std::memory_order_relaxed);
         }
 
         bool await_suspend(std::coroutine_handle<> handle) noexcept {
@@ -171,9 +174,13 @@ public:
         Waiter node;
 
         bool await_ready() const noexcept {
-            // Can acquire shared if no writer locked and no writer waiting
+            // Fast uncontested path: try to increment reader count atomically
             auto s = mutex.state_.load(std::memory_order_acquire);
-            return (s & (kWriterLocked | kWriterWaiting)) == 0;
+            if (s & (kWriterLocked | kWriterWaiting)) return false;
+            return mutex.state_.compare_exchange_strong(
+                s, s + kReaderOne,
+                std::memory_order_acquire,
+                std::memory_order_relaxed);
         }
 
         bool await_suspend(std::coroutine_handle<> handle) noexcept {

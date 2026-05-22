@@ -65,8 +65,8 @@ void bind_ingest(py::module_& m) {
 
     // DataIngestor
     py::class_<DataIngestor>(m, "DataIngestor")
-        .def(py::init<quant::storage::TimeSeriesStore&, quant::event::EventBus&, DataSourceConfig>(),
-             py::arg("store"), py::arg("bus"), py::arg("config"))
+        .def(py::init<quant::storage::StorageEngine&, quant::event::EventBus&, DataSourceConfig>(),
+             py::arg("engine"), py::arg("bus"), py::arg("config"))
         .def("stop", &DataIngestor::stop)
         .def("is_running", &DataIngestor::is_running)
         .def("stats", &DataIngestor::stats)

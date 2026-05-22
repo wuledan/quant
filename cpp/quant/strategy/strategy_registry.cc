@@ -54,6 +54,10 @@ const StrategyEntry* StrategyRegistry::find(uint64_t id) const {
     return (it != entries_.end()) ? &it->second : nullptr;
 }
 
+const StrategyEntry* StrategyRegistry::find_by_id(uint64_t id) const {
+    return find(id);
+}
+
 const StrategyEntry* StrategyRegistry::find_by_name(const std::string& name) const {
     auto it = name_index_.find(name);
     if (it == name_index_.end()) return nullptr;

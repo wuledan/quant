@@ -110,7 +110,8 @@ bool DataInitializer::parse_csv_row(const std::string& line,
 // Load single CSV file
 // ────────────────────────────────────────────────────────────────
 
-bool DataInitializer::load_csv(const std::string& csv_path) {
+bool DataInitializer::load_csv(const std::string& csv_path,
+                               KlineFreq freq) {
     std::ifstream file(csv_path);
     if (!file.is_open()) return false;
 
@@ -136,9 +137,9 @@ bool DataInitializer::load_csv(const std::string& csv_path) {
         }
     }
 
-    // Batch write per symbol
+    // Batch write per symbol, using the specified frequency
     for (auto& [sym, rows] : symbol_rows) {
-        engine_.store_kline_batch(sym, event::DataType::kKlineDay, rows);
+        engine_.store_kline_batch(sym, kline_freq_to_data_type(freq), rows);
     }
 
     files_loaded_.fetch_add(1, std::memory_order_relaxed);

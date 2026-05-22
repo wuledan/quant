@@ -14,7 +14,7 @@
 #include <filesystem>
 
 #include "cpp/quant/ingest/data_ingestor.h"
-#include "cpp/quant/storage/time_series_store.h"
+#include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/event/event_bus.h"
 #include "cpp/quant/event/events/kline_event.h"
 
@@ -28,12 +28,15 @@ protected:
         test_dir_ = std::filesystem::temp_directory_path() / "ingestor_test";
         std::filesystem::create_directories(test_dir_);
 
-        store_ = std::make_unique<TimeSeriesStore>(64, test_dir_.string());
+        StorageEngine::Options opts;
+        opts.cache_budget_mb = 64;
+        opts.data_dir = test_dir_;
+        engine_ = std::make_unique<StorageEngine>(opts);
         bus_ = std::make_unique<EventBus>(EventBus::Options{});
     }
 
     void TearDown() override {
-        store_.reset();
+        engine_.reset();
         bus_.reset();
         std::filesystem::remove_all(test_dir_);
     }
@@ -60,13 +63,13 @@ protected:
     }
 
     std::filesystem::path test_dir_;
-    std::unique_ptr<TimeSeriesStore> store_;
+    std::unique_ptr<StorageEngine> engine_;
     std::unique_ptr<EventBus> bus_;
 };
 
 // ── Test: Manual kline ingestion ──
 TEST_F(DataIngestorTest, ManualIngestKline) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     auto kline = make_kline(1700000000000, 34000000);
     ASSERT_TRUE(ingestor.ingest_kline("000001.SH", kline));
@@ -79,7 +82,7 @@ TEST_F(DataIngestorTest, ManualIngestKline) {
 
 // ── Test: Multiple kline ingestion ──
 TEST_F(DataIngestorTest, MultipleKlineIngestion) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     for (int i = 0; i < 100; i++) {
         auto kline = make_kline(1700000000000 + i * 60000, 34000000 + i * 1000);
@@ -93,7 +96,7 @@ TEST_F(DataIngestorTest, MultipleKlineIngestion) {
 
 // ── Test: Statistics tracking ──
 TEST_F(DataIngestorTest, StatisticsTracking) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     auto stats = ingestor.stats();
     EXPECT_EQ(stats.klines_received, 0);
@@ -111,7 +114,7 @@ TEST_F(DataIngestorTest, StatisticsTracking) {
 
 // ── Test: Stop/shutdown ──
 TEST_F(DataIngestorTest, StopShutdown) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     EXPECT_FALSE(ingestor.is_running());
 
@@ -121,7 +124,7 @@ TEST_F(DataIngestorTest, StopShutdown) {
 
 // ── Test: Event publishing on ingest ──
 TEST_F(DataIngestorTest, EventPublishing) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     // Subscribe to kline events using IEventSubscriber
     struct KlineCounter : public IEventSubscriber {
@@ -145,7 +148,7 @@ TEST_F(DataIngestorTest, EventPublishing) {
 
 // ── Test: Multiple symbols ──
 TEST_F(DataIngestorTest, MultipleSymbols) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     ingestor.ingest_kline("000001.SH", make_kline(1700000000000, 34000000));
     ingestor.ingest_kline("600519.SH", make_kline(1700000000000, 180000000));
@@ -159,7 +162,7 @@ TEST_F(DataIngestorTest, MultipleSymbols) {
 // ── Test: Parse kline with float prices (×10000 conversion) ──
 // This tests the network JSON format where prices arrive as floats.
 TEST_F(DataIngestorTest, ParseKlineFloatPrices) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     // JSON with float prices — typical network format
     const char* json = R"({"symbol":"600519.SH","ts":1700000000000,"open":3400.50,"high":3420.00,"low":3380.25,"close":3410.75,"volume":1500000,"amount":5125000000})";
@@ -189,7 +192,7 @@ TEST_F(DataIngestorTest, ParseKlineFloatPrices) {
 // ── Test: Parse kline with integer prices (backward compat) ──
 // When prices are already in fixed-point (e.g. from internal sources).
 TEST_F(DataIngestorTest, ParseKlineIntegerPrices) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     // JSON with integer prices — already in fixed-point
     const char* json = R"({"symbol":"000001.SH","ts":1700000000000,"open":34000000,"high":34200000,"low":33800000,"close":34100000,"volume":1000000,"amount":34000000000})";
@@ -209,7 +212,7 @@ TEST_F(DataIngestorTest, ParseKlineIntegerPrices) {
 
 // ── Test: Parse kline error cases ──
 TEST_F(DataIngestorTest, ParseKlineErrors) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     std::string symbol;
     KlineData kline{};
@@ -238,7 +241,7 @@ TEST_F(DataIngestorTest, ParseKlineErrors) {
 
 // ── Test: Parse kline with mixed float/int fields ──
 TEST_F(DataIngestorTest, ParseKlineMixedPrices) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     // Some prices as float, some as int
     const char* json = R"({"symbol":"000001.SZ","ts":1700000000000,"open":15.30,"high":156000,"low":151000,"close":15.55,"volume":800000,"amount":12400000})";
@@ -262,7 +265,7 @@ TEST_F(DataIngestorTest, ParseKlineMixedPrices) {
 
 // ── Test: Ingest kline from parsed JSON (float prices) ──
 TEST_F(DataIngestorTest, IngestFromParsedFloatJson) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     const char* json = R"({"symbol":"600519.SH","ts":1700000000000,"open":3400.50,"high":3420.00,"low":3380.25,"close":3410.75,"volume":1500000,"amount":5125000000})";
     size_t len = std::strlen(json);
@@ -282,7 +285,7 @@ TEST_F(DataIngestorTest, IngestFromParsedFloatJson) {
 
 // ── Test: Event content verification ──
 TEST_F(DataIngestorTest, EventContentVerification) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     struct KlineCapture : public IEventSubscriber {
         std::string last_symbol;
@@ -327,7 +330,7 @@ TEST_F(DataIngestorTest, EventContentVerification) {
 
 // ── Test: Parse kline with whitespace in JSON ──
 TEST_F(DataIngestorTest, ParseKlineWithWhitespace) {
-    DataIngestor ingestor(*store_, *bus_, make_config());
+    DataIngestor ingestor(*engine_, *bus_, make_config());
 
     const char* json = R"({ "symbol" : "000001.SH" , "ts" : 1700000000000 , "open" : 3400.50 , "high" : 3420.00 , "low" : 3380.25 , "close" : 3410.75 , "volume" : 1500000 , "amount" : 5125000000 })";
     size_t len = std::strlen(json);

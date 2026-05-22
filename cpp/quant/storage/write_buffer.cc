@@ -1,14 +1,9 @@
 // write_buffer.cc — Coroutine-friendly write buffer with WAL + periodic flush
 //
-// Migration from std::mutex → AffinityMutex for thread-affine locking.
-// Background flush uses jthread + cv (kept for simplicity; coroutine
-// migration of the background loop requires executor binding that
-// isn't yet wired up in service_main).
+// Fully coroutine-based: uses AffinityMutex for thread-affine locking,
+// coroutine background task (co_sleep loop) instead of jthread+cv.
 #include "cpp/quant/storage/write_buffer.h"
 #include "cpp/quant/storage/storage_engine.h"
-
-#include <chrono>
-#include <thread>
 
 namespace quant::storage {
 
@@ -18,104 +13,11 @@ WriteBuffer::WriteBuffer(StorageEngine& engine, Options opts)
     if (opts_.enable_wal) {
         wal_ = std::make_unique<WriteAheadLog>(opts_.wal_opts);
     }
-
-    flush_thread_ = std::jthread([this](std::stop_token st) {
-        background_flush(std::move(st));
-    });
 }
 
 WriteBuffer::~WriteBuffer() {
-    stopped_.store(true);
-    flush_thread_.request_stop();
-    if (flush_thread_.joinable()) {
-        flush_thread_.join();
-    }
+    stop_background_flush();
     flush();
-}
-
-// ── Synchronous API (backward compatible) ──
-
-StoreStatus WriteBuffer::write(std::string_view symbol, uint8_t data_type,
-                                const event::KlineRow& row) {
-    // WAL first (crash safety)
-    if (wal_) {
-        if (!wal_->append(symbol, data_type, row)) {
-            return StoreStatus::kIoError;
-        }
-    }
-
-    {
-        // Use AffinityMutex with try_lock + yield for sync context
-        while (!mutex_.try_lock()) {
-            std::this_thread::yield();
-        }
-        BufferKey key{std::string(symbol), data_type};
-        buffers_[key].push_back(row);
-        pending_rows_.fetch_add(1, std::memory_order_relaxed);
-        mutex_.unlock();
-    }
-
-    // Flush if threshold reached
-    if (pending_rows_.load(std::memory_order_relaxed) >= opts_.flush_row_threshold) {
-        flush();
-    }
-
-    return StoreStatus::kOk;
-}
-
-StoreStatus WriteBuffer::write_batch(std::string_view symbol, uint8_t data_type,
-                                      const std::vector<event::KlineRow>& rows) {
-    if (rows.empty()) return StoreStatus::kInvalidArgument;
-
-    // WAL first
-    if (wal_) {
-        if (!wal_->append_batch(symbol, data_type, rows)) {
-            return StoreStatus::kIoError;
-        }
-    }
-
-    {
-        while (!mutex_.try_lock()) {
-            std::this_thread::yield();
-        }
-        BufferKey key{std::string(symbol), data_type};
-        auto& buf = buffers_[key];
-        buf.reserve(buf.size() + rows.size());
-        for (const auto& row : rows) {
-            buf.push_back(row);
-        }
-        pending_rows_.fetch_add(rows.size(), std::memory_order_relaxed);
-        mutex_.unlock();
-    }
-
-    if (pending_rows_.load(std::memory_order_relaxed) >= opts_.flush_row_threshold) {
-        flush();
-    }
-
-    return StoreStatus::kOk;
-}
-
-void WriteBuffer::flush() {
-    while (!mutex_.try_lock()) {
-        std::this_thread::yield();
-    }
-    flush_locked();
-}
-
-void WriteBuffer::flush_locked() {
-    for (auto& [key, rows] : buffers_) {
-        if (rows.empty()) continue;
-        engine_.store_kline_batch(key.symbol,
-                                   static_cast<event::DataType>(key.data_type),
-                                   rows);
-    }
-    buffers_.clear();
-    pending_rows_.store(0, std::memory_order_relaxed);
-
-    // Truncate WAL after successful flush
-    if (wal_) {
-        wal_->truncate();
-    }
 }
 
 // ── Coroutine API ──
@@ -176,9 +78,7 @@ CoTask<void> WriteBuffer::co_flush() {
 CoTask<void> WriteBuffer::do_flush_locked() {
     for (auto& [key, rows] : buffers_) {
         if (rows.empty()) continue;
-        engine_.store_kline_batch(key.symbol,
-                                   static_cast<event::DataType>(key.data_type),
-                                   rows);
+        co_await engine_.co_store_kline_batch(key.symbol, key.data_type, rows);
     }
     buffers_.clear();
     pending_rows_.store(0, std::memory_order_relaxed);
@@ -189,28 +89,54 @@ CoTask<void> WriteBuffer::do_flush_locked() {
     }
 }
 
-// ── Background flush (jthread, same as original but with AffinityMutex) ──
+// ── Synchronous API (backward compatible, wraps coroutine API via blockingWait) ──
 
-void WriteBuffer::background_flush(std::stop_token st) {
-    while (!st.stop_requested()) {
-        std::this_thread::sleep_for(opts_.flush_interval);
-
-        if (st.stop_requested()) break;
-
-        if (pending_rows_.load(std::memory_order_relaxed) > 0) {
-            flush();
-        }
-    }
+StoreStatus WriteBuffer::write(std::string_view symbol, uint8_t data_type,
+                                const event::KlineRow& row) {
+    return infra::blockingWait(co_write(symbol, data_type, row));
 }
 
-// ── Background flush lifecycle ──
+StoreStatus WriteBuffer::write_batch(std::string_view symbol, uint8_t data_type,
+                                      const std::vector<event::KlineRow>& rows) {
+    return infra::blockingWait(co_write_batch(symbol, data_type, rows));
+}
 
-// start_background_flush() is a no-op inline in the header (jthread
-// auto-starts in constructor).
+void WriteBuffer::flush() {
+    infra::blockingWait(co_flush());
+}
+
+// ── Background flush ──
+
+void WriteBuffer::start_background_flush(folly::Executor* executor) {
+    bg_executor_ = executor;
+    stopped_.store(false);
+
+    // Launch the background flush loop as a detached coroutine on the executor.
+    // folly::coro::co_withExecutor binds the task to the executor so it
+    // can use co_sleep and co_await co_scoped_lock() properly.
+    flush_scope_.add(
+        folly::coro::co_withExecutor(executor, background_flush_loop()));
+}
 
 void WriteBuffer::stop_background_flush() {
     stopped_.store(true);
-    flush_thread_.request_stop();
+}
+
+folly::coro::Task<void> WriteBuffer::background_flush_loop() {
+    while (!stopped_.load(std::memory_order_relaxed)) {
+        co_await infra::sleep(opts_.flush_interval);
+
+        if (stopped_.load(std::memory_order_relaxed)) break;
+
+        if (pending_rows_.load(std::memory_order_relaxed) > 0) {
+            try {
+                co_await co_flush();
+            } catch (...) {
+                // Flush errors are logged but don't stop the background loop.
+                // The data stays in the buffer and will be retried next cycle.
+            }
+        }
+    }
 }
 
 // ── Recovery ──
@@ -229,9 +155,7 @@ void WriteBuffer::recover() {
     }
 
     for (auto& [key, rows] : groups) {
-        engine_.store_kline_batch(key.symbol,
-                                   static_cast<event::DataType>(key.data_type),
-                                   rows);
+        infra::blockingWait(engine_.co_store_kline_batch(key.symbol, key.data_type, rows));
     }
 
     // Clear WAL after recovery

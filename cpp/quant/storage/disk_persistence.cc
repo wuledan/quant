@@ -21,6 +21,8 @@ DiskPersistence::DiskPersistence(std::filesystem::path data_dir, SyncMode sync_m
     if (!std::filesystem::exists(data_dir_)) {
         std::filesystem::create_directories(data_dir_);
     }
+    // Build in-memory index from existing .seg files at startup
+    index_.build(data_dir_.string());
 }
 
 DiskPersistence::~DiskPersistence() = default;
@@ -92,6 +94,9 @@ std::string DiskPersistence::write_segment(
             ::close(fd);
         }
     }
+
+    // Update in-memory index with the new segment's block metadata
+    index_.add_segment(data_dir_.string(), fname);
 
     return fname;
 }
@@ -189,7 +194,45 @@ std::vector<std::string> DiskPersistence::list_segments(
 
 bool DiskPersistence::delete_segment(std::string_view filename) {
     std::filesystem::path fpath = data_dir_ / filename;
+
+    // Read header to get symbol+data_type for index removal
+    std::ifstream ifs(fpath, std::ios::binary);
+    if (ifs) {
+        SegmentHeader header;
+        ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (header.magic == kSegmentMagic) {
+            std::string symbol(header.symbol, header.symbol_len);
+            index_.remove_file(symbol, header.data_type, filename);
+        }
+    }
+
     return std::filesystem::remove(fpath);
+}
+
+std::vector<SegmentMeta> DiskPersistence::query_index(
+    std::string_view symbol, uint8_t data_type,
+    DataField field, int64_t begin_ts, int64_t end_ts) const {
+    return index_.query(symbol, data_type, field, begin_ts, end_ts);
+}
+
+ColumnBlock DiskPersistence::read_block_at(
+    std::string_view filename,
+    DataField field,
+    ColumnBlock::Codec codec,
+    size_t row_count,
+    size_t offset,
+    size_t compressed_size,
+    int64_t min_ts,
+    int64_t max_ts) const {
+    std::filesystem::path fpath = data_dir_ / filename;
+    std::ifstream ifs(fpath, std::ios::binary);
+    if (!ifs) return {};
+
+    std::vector<uint8_t> comp_data(compressed_size);
+    ifs.seekg(static_cast<std::streamoff>(offset));
+    ifs.read(reinterpret_cast<char*>(comp_data.data()), comp_data.size());
+
+    return ColumnBlock(field, codec, row_count, std::move(comp_data), min_ts, max_ts);
 }
 
 void DiskPersistence::flush() {
@@ -302,6 +345,10 @@ CoTask<std::string> DiskPersistence::co_write_segment(
     }
 
     ::close(fd);
+
+    // Update in-memory index with the new segment's block metadata
+    index_.add_segment(data_dir_.string(), fname);
+
     co_return fname;
 }
 

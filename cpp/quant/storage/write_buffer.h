@@ -1,16 +1,13 @@
 // write_buffer.h — Coroutine-friendly write buffer with WAL + periodic flush
 //
-// Migration: std::mutex → AffinityMutex for thread-affine locking.
-// Background flush uses jthread + cv (kept for simplicity; coroutine
-// migration of the background loop requires executor binding).
-// Both sync and coroutine APIs are provided.
+// Fully coroutine-based: uses AffinityMutex for thread-affine locking,
+// coroutine background task (co_sleep loop) instead of jthread,
+// and CoTask-returning methods for coroutine chains.
 #pragma once
 
 #include <atomic>
 #include <chrono>
-#include <stop_token>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -31,7 +28,7 @@ public:
     struct Options {
         WriteAheadLog::Options wal_opts;
         size_t flush_row_threshold = 8192;       // flush after this many rows
-        std::chrono::seconds flush_interval{5};   // flush after this duration
+        std::chrono::milliseconds flush_interval{5000};  // flush after this duration
         bool enable_wal = true;
     };
 
@@ -41,7 +38,16 @@ public:
     WriteBuffer(const WriteBuffer&) = delete;
     WriteBuffer& operator=(const WriteBuffer&) = delete;
 
-    // ── Synchronous API (backward compatible) ──
+    // ── Coroutine API (preferred) ──
+    CoTask<StoreStatus> co_write(std::string_view symbol, uint8_t data_type,
+                                 const event::KlineRow& row);
+
+    CoTask<StoreStatus> co_write_batch(std::string_view symbol, uint8_t data_type,
+                                       const std::vector<event::KlineRow>& rows);
+
+    CoTask<void> co_flush();
+
+    // ── Synchronous API (backward compatible, wraps coroutine API) ──
     StoreStatus write(std::string_view symbol, uint8_t data_type,
                       const event::KlineRow& row);
 
@@ -51,19 +57,12 @@ public:
     void flush();
     void recover();
 
-    // ── Coroutine API ──
-    CoTask<StoreStatus> co_write(std::string_view symbol, uint8_t data_type,
-                                 const event::KlineRow& row);
-
-    CoTask<StoreStatus> co_write_batch(std::string_view symbol, uint8_t data_type,
-                                       const std::vector<event::KlineRow>& rows);
-
-    CoTask<void> co_flush();
-
     // ── Background flush lifecycle ──
-    // Note: background flush is auto-started in constructor via jthread.
-    // These are kept for future coroutine-based background flush migration.
-    void start_background_flush() {}  // No-op: already started
+    // Start the background flush coroutine on the given executor.
+    // Must be called after construction, before any writes.
+    void start_background_flush(folly::Executor* executor);
+
+    // Stop the background flush coroutine. Called automatically in destructor.
     void stop_background_flush();
 
     size_t pending_rows() const noexcept { return pending_rows_.load(); }
@@ -86,7 +85,10 @@ private:
 
     void flush_locked();
     CoTask<void> do_flush_locked();
-    void background_flush(std::stop_token st);
+
+    // Background flush coroutine — runs on the executor, periodically
+    // flushes the buffer using co_sleep instead of jthread+cv.
+    folly::coro::Task<void> background_flush_loop();
 
     StorageEngine& engine_;
     Options opts_;
@@ -97,7 +99,9 @@ private:
                        BufferKeyHash> buffers_;
     std::atomic<size_t> pending_rows_{0};
 
-    std::jthread flush_thread_;
+    // Background coroutine management
+    folly::coro::AsyncScope flush_scope_;
+    folly::Executor* bg_executor_{nullptr};
     std::atomic<bool> stopped_{false};
 };
 

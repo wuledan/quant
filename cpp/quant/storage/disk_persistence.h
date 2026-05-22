@@ -11,6 +11,7 @@
 #include "cpp/quant/infra/coroutine.h"
 
 #include "cpp/quant/storage/column_block.h"
+#include "cpp/quant/storage/segment_index.h"
 
 namespace quant::network { class CoIouring; }
 
@@ -86,6 +87,25 @@ public:
     std::vector<std::string> list_segments(std::string_view symbol,
                                            uint8_t data_type) const;
 
+    // Query segment blocks via in-memory index (O(log n) instead of O(n) directory scan)
+    // Returns SegmentMeta entries matching symbol+data_type+field that overlap [begin_ts, end_ts]
+    std::vector<SegmentMeta> query_index(std::string_view symbol,
+                                          uint8_t data_type,
+                                          DataField field,
+                                          int64_t begin_ts,
+                                          int64_t end_ts) const;
+
+    // Read a specific block from a segment file by offset and size
+    // More efficient than read_segment when you know the exact block location
+    ColumnBlock read_block_at(std::string_view filename,
+                              DataField field,
+                              ColumnBlock::Codec codec,
+                              size_t row_count,
+                              size_t offset,
+                              size_t compressed_size,
+                              int64_t min_ts,
+                              int64_t max_ts) const;
+
     // Delete a segment file
     bool delete_segment(std::string_view filename);
 
@@ -94,6 +114,10 @@ public:
 
     const std::filesystem::path& data_dir() const noexcept { return data_dir_; }
     SyncMode sync_mode() const noexcept { return sync_mode_; }
+
+    // Access the segment index for startup build / inspection
+    SegmentIndex& index() noexcept { return index_; }
+    const SegmentIndex& index() const noexcept { return index_; }
 
 public:
     void set_io_uring(quant::network::CoIouring* ring) noexcept { ring_ = ring; }
@@ -114,6 +138,7 @@ private:
     std::filesystem::path data_dir_;
     SyncMode sync_mode_;
     quant::network::CoIouring* ring_{nullptr};
+    SegmentIndex index_;  // in-memory segment index for O(log n) queries
 };
 
 }  // namespace quant::storage

@@ -27,8 +27,8 @@ export class MarketWebSocket {
   private closeCallbacks: EventCallback[] = [];
   private errorCallbacks: EventCallback[] = [];
 
-  /** Default WS URL pointing to C++ WsEventBridge on :8080 */
-  static readonly DEFAULT_URL = 'ws://localhost:8080';
+  /** Default WS URL pointing to C++ WsEventBridge on :8282 */
+  static readonly DEFAULT_URL = 'ws://192.168.3.10:8282';
 
   get isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;

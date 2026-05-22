@@ -1,10 +1,10 @@
 // data_ingestor.h — Coroutine-based market data ingestor
 //
 // Connects to market data sources (TCP/WebSocket), parses incoming data,
-// and writes to StorageEngine via TimeSeriesStore.
+// and writes to StorageEngine.
 //
 // Architecture:
-//   DataSource → TcpConnection → DataIngestor → TimeSeriesStore
+//   DataSource → TcpConnection → DataIngestor → StorageEngine
 //                                     ↓
 //                               EventBus (publish kline/trade events)
 #pragma once
@@ -16,7 +16,7 @@
 
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/network/tcp_connection.h"
-#include "cpp/quant/storage/time_series_store.h"
+#include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/event/event_bus.h"
 
 namespace quant::ingest {
@@ -61,7 +61,7 @@ struct IngestorStats {
 class DataIngestor {
 public:
     explicit DataIngestor(
-        storage::TimeSeriesStore& store,
+        storage::StorageEngine& engine,
         event::EventBus& bus,
         DataSourceConfig config
     );
@@ -106,7 +106,7 @@ private:
     // ── Event publishing ──
     void publish_kline_event(const std::string& symbol, const KlineData& kline);
 
-    storage::TimeSeriesStore& store_;
+    storage::StorageEngine& engine_;
     event::EventBus& bus_;
     DataSourceConfig config_;
 

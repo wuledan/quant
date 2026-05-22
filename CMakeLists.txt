@@ -108,6 +108,8 @@ add_library(quant_infra
     cpp/quant/infra/affinity_mutex.cc
     cpp/quant/infra/affinity_shared_mutex.cc
     cpp/quant/infra/timer_scheduler.cc
+    cpp/quant/infra/etcd_client.cc
+    cpp/quant/infra/strategy_watcher.cc
 )
 
 target_include_directories(quant_infra PUBLIC
@@ -175,6 +177,7 @@ add_library(quant_storage
     cpp/quant/storage/time_series_cache.cc
     cpp/quant/storage/time_series_store.cc
     cpp/quant/storage/disk_persistence.cc
+    cpp/quant/storage/segment_index.cc
     cpp/quant/storage/storage_engine.cc
     cpp/quant/storage/data_initializer.cc
     cpp/quant/storage/write_ahead_log.cc
@@ -432,6 +435,11 @@ add_executable(affinity_shared_mutex_test cpp/test/affinity_shared_mutex_test.cc
 target_link_libraries(affinity_shared_mutex_test PRIVATE quant_infra GTest::gtest_main)
 add_test(NAME affinity_shared_mutex_test COMMAND affinity_shared_mutex_test)
 
+# ── etcd_client integration test (requires Docker etcd) ──
+add_executable(etcd_client_test cpp/test/etcd_client_test.cc)
+target_link_libraries(etcd_client_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME etcd_client_test COMMAND etcd_client_test)
+
 # ── Coroutine and thread-local stats tests ──
 add_executable(coroutine_test cpp/test/coroutine_test.cc)
 target_link_libraries(coroutine_test PRIVATE quant_infra GTest::gtest_main)
@@ -559,6 +567,11 @@ add_test(NAME backtest_test COMMAND backtest_test)
 add_executable(strategy_center_test cpp/test/strategy_center_test.cc)
 target_link_libraries(strategy_center_test PRIVATE quant_strategy GTest::gtest_main)
 add_test(NAME strategy_center_test COMMAND strategy_center_test)
+
+# ── Strategy registry / watcher test ──
+add_executable(strategy_watcher_test cpp/test/strategy_watcher_test.cc)
+target_link_libraries(strategy_watcher_test PRIVATE quant_strategy GTest::gtest_main)
+add_test(NAME strategy_watcher_test COMMAND strategy_watcher_test)
 
 # ── API library ──
 add_library(quant_api

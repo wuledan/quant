@@ -1,187 +1,200 @@
-// time_series_cache.cc — TimeSeriesCache implementation
+// time_series_cache.cc — Sharded in-memory time-series cache implementation
 #include "cpp/quant/storage/time_series_cache.h"
 
 #include <algorithm>
-#include <chrono>
-#include <mutex>
+#include <thread>
+
+#include "cpp/quant/infra/coroutine.h"
 
 namespace quant::storage {
 
-TimeSeriesCache::TimeSeriesCache(size_t memory_budget_mb)
-    : memory_budget_(memory_budget_mb * 1024 * 1024) {
-    for (auto& shard : shards_) {
-        shard = std::make_unique<Shard>();
+TimeSeriesCache::TimeSeriesCache(Options opts)
+    : opts_(std::move(opts)) {
+    shards_.reserve(opts_.num_shards);
+    for (size_t i = 0; i < opts_.num_shards; ++i) {
+        shards_.push_back(std::make_unique<Shard>());
     }
 }
 
-void TimeSeriesCache::append(std::string_view symbol,
-                               quant::event::DataType type,
-                               ColumnBlock block,
-                               DataSource source) {
-    size_t idx = shard_index(symbol);
-    auto& shard = *shards_[idx];
-
-    size_t mem = block_memory(block);
-    CacheKey key{std::string(symbol), type};
-    uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    {
-        std::unique_lock lock(shard.rwlock);
-        auto& entry = shard.entries[key];
-        entry.blocks.push_back(std::move(block));
-        entry.meta.source = source;  // Set source on first append
-        shard.last_access[key] = now;
-        shard.memory_used += mem;
-    }
-    total_memory_.fetch_add(mem, std::memory_order_relaxed);
-
-    // Auto-evict if over budget
-    if (total_memory_.load(std::memory_order_relaxed) > memory_budget_) {
-        evict(memory_budget_ * 80 / 100);  // evict down to 80% of budget
-    }
+size_t TimeSeriesCache::shard_index(std::string_view symbol, uint8_t data_type) const {
+    size_t h = std::hash<std::string_view>()(symbol);
+    h ^= static_cast<size_t>(data_type) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    return h % shards_.size();
 }
 
-std::vector<ColumnBlock> TimeSeriesCache::query(
-    std::string_view symbol,
-    quant::event::DataType type,
-    DataField field,
-    TimeRange range) const {
-    size_t idx = shard_index(symbol);
+// ── Coroutine API ──
+
+CoTask<void> TimeSeriesCache::co_append(
+    std::string_view symbol, uint8_t data_type, KlineRow row) {
+    auto idx = shard_index(symbol, data_type);
     auto& shard = *shards_[idx];
+    auto lock = co_await shard.rwlock.co_scoped_lock();
 
-    CacheKey key{std::string(symbol), type};
-    uint64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
+    ShardKey key{std::string(symbol), data_type};
+    auto& entry = shard.entries[key];
 
-    std::shared_lock lock(shard.rwlock);
+    // Insert maintaining sort by ts
+    auto it = std::lower_bound(entry.rows.begin(), entry.rows.end(), row.timestamp,
+                               [](const KlineRow& r, int64_t ts) {
+                                   return r.timestamp < ts;
+                               });
+    entry.rows.insert(it, std::move(row));
+    entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, row.timestamp);
+    co_return;
+}
 
-    // Update access timestamp
-    auto access_it = shard.last_access.find(key);
-    if (access_it != shard.last_access.end()) {
-        access_it->second = now;
+CoTask<void> TimeSeriesCache::co_append_batch(
+    std::string_view symbol, uint8_t data_type, std::vector<KlineRow> rows) {
+    if (rows.empty()) co_return;
+
+    auto idx = shard_index(symbol, data_type);
+    auto& shard = *shards_[idx];
+    auto lock = co_await shard.rwlock.co_scoped_lock();
+
+    ShardKey key{std::string(symbol), data_type};
+    auto& entry = shard.entries[key];
+
+    int64_t max_ts = 0;
+    for (auto& r : rows) {
+        max_ts = std::max(max_ts, r.timestamp);
     }
 
+    // Merge sorted: existing rows + new rows
+    auto& existing = entry.rows;
+    existing.reserve(existing.size() + rows.size());
+    for (auto& r : rows) {
+        auto it = std::lower_bound(existing.begin(), existing.end(), r.timestamp,
+                                   [](const KlineRow& row, int64_t ts) {
+                                       return row.timestamp < ts;
+                                   });
+        existing.insert(it, std::move(r));
+    }
+    entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, max_ts);
+    co_return;
+}
+
+CoTask<std::vector<KlineRow>> TimeSeriesCache::co_query(
+    std::string_view symbol, uint8_t data_type,
+    int64_t start_ts, int64_t end_ts) {
+    auto idx = shard_index(symbol, data_type);
+    auto& shard = *shards_[idx];
+    auto lock = co_await shard.rwlock.co_scoped_shared_lock();
+
+    ShardKey key{std::string(symbol), data_type};
     auto it = shard.entries.find(key);
-    if (it == shard.entries.end()) return {};
+    if (it == shard.entries.end()) co_return {};
 
-    std::vector<ColumnBlock> result;
-    for (const auto& block : it->second.blocks) {
-        if (block.field() == field) {
-            // Check time range overlap
-            if (block.max_timestamp() >= range.begin_ts &&
-                block.min_timestamp() <= range.end_ts) {
-                result.push_back(block);
-            }
-        }
-    }
-    return result;
+    const auto& rows = it->second.rows;
+    if (rows.empty()) co_return {};
+
+    // Binary search for [start_ts, end_ts]
+    auto lo = std::lower_bound(rows.begin(), rows.end(), start_ts,
+                               [](const KlineRow& r, int64_t ts) {
+                                   return r.timestamp < ts;
+                               });
+    auto hi = std::upper_bound(lo, rows.end(), end_ts,
+                               [](int64_t ts, const KlineRow& r) {
+                                   return ts < r.timestamp;
+                               });
+
+    std::vector<KlineRow> result(lo, hi);
+    co_return result;
 }
 
-void TimeSeriesCache::evict(std::string_view symbol, quant::event::DataType type) {
-    size_t idx = shard_index(symbol);
+// ── Synchronous API ──
+//
+// Uses try_lock/try_lock_shared directly on AffinitySharedMutex to avoid
+// blockingWait which interacts poorly with coroutine-specific mutexes.
+
+void TimeSeriesCache::append(std::string_view symbol, uint8_t data_type, KlineRow row) {
+    auto idx = shard_index(symbol, data_type);
     auto& shard = *shards_[idx];
 
-    CacheKey key{std::string(symbol), type};
-
-    {
-        std::unique_lock lock(shard.rwlock);
-        auto it = shard.entries.find(key);
-        if (it != shard.entries.end()) {
-            size_t entry_mem = 0;
-            for (const auto& block : it->second.blocks) {
-                entry_mem += block_memory(block);
-            }
-            shard.entries.erase(it);
-            shard.last_access.erase(key);
-            shard.memory_used -= entry_mem;
-            total_memory_.fetch_sub(entry_mem, std::memory_order_relaxed);
-        }
+    // Spin on try_lock instead of blockingWait(co_append) since
+    // AffinitySharedMutex is designed for coroutine use.
+    while (!shard.rwlock.try_lock()) {
+        std::this_thread::yield();
     }
+
+    ShardKey key{std::string(symbol), data_type};
+    auto& entry = shard.entries[key];
+
+    auto it = std::lower_bound(entry.rows.begin(), entry.rows.end(), row.timestamp,
+                               [](const KlineRow& r, int64_t ts) {
+                                   return r.timestamp < ts;
+                               });
+    entry.rows.insert(it, std::move(row));
+    entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, row.timestamp);
+
+    shard.rwlock.unlock();
 }
 
-void TimeSeriesCache::evict(size_t target_bytes) {
-    // Collect all entries across shards with their access timestamps
-    struct EntryInfo {
-        CacheKey key;
-        uint64_t access_time;
-        size_t entry_memory;
-        size_t shard_idx;
-    };
+void TimeSeriesCache::append_batch(std::string_view symbol, uint8_t data_type,
+                                   std::vector<KlineRow> rows) {
+    if (rows.empty()) return;
 
-    std::vector<EntryInfo> entries;
-
-    for (size_t i = 0; i < kShardCount; ++i) {
-        auto& shard = *shards_[i];
-        std::shared_lock lock(shard.rwlock);
-        for (const auto& [key, value] : shard.entries) {
-            auto it = shard.last_access.find(key);
-            uint64_t at = (it != shard.last_access.end()) ? it->second : 0;
-            size_t mem = 0;
-            for (const auto& block : value.blocks) {
-                mem += block_memory(block);
-            }
-            entries.push_back(EntryInfo{key, at, mem, i});
-        }
-    }
-
-    // Sort by access time ascending (LRU first)
-    std::sort(entries.begin(), entries.end(),
-        [](const EntryInfo& a, const EntryInfo& b) {
-            return a.access_time < b.access_time;
-        });
-
-    // Evict entries until under budget
-    size_t current = total_memory_.load(std::memory_order_relaxed);
-    for (const auto& entry : entries) {
-        if (current <= target_bytes) break;
-
-        auto& shard = *shards_[entry.shard_idx];
-        std::unique_lock lock(shard.rwlock);
-
-        auto it = shard.entries.find(entry.key);
-        if (it == shard.entries.end()) continue;
-
-        size_t entry_mem = 0;
-        for (const auto& block : it->second.blocks) {
-            entry_mem += block_memory(block);
-        }
-        shard.entries.erase(it);
-        shard.last_access.erase(entry.key);
-        shard.memory_used -= entry_mem;
-        current -= entry_mem;
-        total_memory_.fetch_sub(entry_mem, std::memory_order_relaxed);
-    }
-}
-
-CacheEntryMeta TimeSeriesCache::get_meta(std::string_view symbol,
-                                          quant::event::DataType type) const {
-    size_t idx = shard_index(symbol);
+    auto idx = shard_index(symbol, data_type);
     auto& shard = *shards_[idx];
 
-    CacheKey key{std::string(symbol), type};
+    while (!shard.rwlock.try_lock()) {
+        std::this_thread::yield();
+    }
 
-    std::shared_lock lock(shard.rwlock);
+    ShardKey key{std::string(symbol), data_type};
+    auto& entry = shard.entries[key];
+
+    int64_t max_ts = 0;
+    for (auto& r : rows) {
+        max_ts = std::max(max_ts, r.timestamp);
+    }
+
+    auto& existing = entry.rows;
+    existing.reserve(existing.size() + rows.size());
+    for (auto& r : rows) {
+        auto it = std::lower_bound(existing.begin(), existing.end(), r.timestamp,
+                                   [](const KlineRow& row, int64_t ts) {
+                                       return row.timestamp < ts;
+                                   });
+        existing.insert(it, std::move(r));
+    }
+    entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, max_ts);
+
+    shard.rwlock.unlock();
+}
+
+std::vector<KlineRow> TimeSeriesCache::query(std::string_view symbol, uint8_t data_type,
+                                             int64_t start_ts, int64_t end_ts) {
+    auto idx = shard_index(symbol, data_type);
+    auto& shard = *shards_[idx];
+
+    while (!shard.rwlock.try_lock_shared()) {
+        std::this_thread::yield();
+    }
+
+    ShardKey key{std::string(symbol), data_type};
     auto it = shard.entries.find(key);
     if (it == shard.entries.end()) {
-        return CacheEntryMeta{};  // return default meta if not found
+        shard.rwlock.unlock_shared();
+        return {};
     }
-    return it->second.meta;
-}
 
-void TimeSeriesCache::set_meta(std::string_view symbol,
-                                quant::event::DataType type,
-                                CacheEntryMeta meta) {
-    size_t idx = shard_index(symbol);
-    auto& shard = *shards_[idx];
+    const auto& rows = it->second.rows;
+    std::vector<KlineRow> result;
 
-    CacheKey key{std::string(symbol), type};
-
-    std::unique_lock lock(shard.rwlock);
-    auto it = shard.entries.find(key);
-    if (it != shard.entries.end()) {
-        it->second.meta = meta;
+    if (!rows.empty()) {
+        auto lo = std::lower_bound(rows.begin(), rows.end(), start_ts,
+                                   [](const KlineRow& r, int64_t ts) {
+                                       return r.timestamp < ts;
+                                   });
+        auto hi = std::upper_bound(lo, rows.end(), end_ts,
+                                   [](int64_t ts, const KlineRow& r) {
+                                       return ts < r.timestamp;
+                                   });
+        result.assign(lo, hi);
     }
+
+    shard.rwlock.unlock_shared();
+    return result;
 }
 
 }  // namespace quant::storage

@@ -10,6 +10,55 @@
 
 namespace quant::storage {
 
+// ── KlineFreq: K-line (candlestick) frequency ──
+// Maps to distinct data_type values (aligned with event::DataType enum).
+// Each frequency is stored in separate segment files and indexed independently.
+enum class KlineFreq : uint8_t {
+    kMin1  = 2,   // 1-minute bars   (event::DataType::kKlineMin1)
+    kMin5  = 3,   // 5-minute bars   (event::DataType::kKlineMin5)
+    kMin15 = 4,   // 15-minute bars  (event::DataType::kKlineMin15)
+    kMin30 = 5,   // 30-minute bars  (event::DataType::kKlineMin30)
+    kMin60 = 6,   // 60-minute bars  (event::DataType::kKlineMin60)
+    kDay   = 7,   // daily bars      (event::DataType::kKlineDay)
+};
+
+// Convert KlineFreq to the data_type byte used in segment files / index
+// Values are aligned with event::DataType enum
+constexpr uint8_t kline_freq_to_data_type(KlineFreq f) noexcept {
+    return static_cast<uint8_t>(f);
+}
+
+// Convert data_type byte back to KlineFreq; returns false if not a kline type
+// Accepts data_type values 2..7 (kKlineMin1..kKlineDay)
+inline bool data_type_to_kline_freq(uint8_t data_type, KlineFreq& out) noexcept {
+    if (data_type >= 2 && data_type <= 7) {
+        out = static_cast<KlineFreq>(data_type);
+        return true;
+    }
+    return false;
+}
+
+// Human-readable label for KlineFreq
+inline const char* kline_freq_label(KlineFreq f) noexcept {
+    switch (f) {
+        case KlineFreq::kMin1:  return "1min";
+        case KlineFreq::kMin5:  return "5min";
+        case KlineFreq::kMin15: return "15min";
+        case KlineFreq::kMin30: return "30min";
+        case KlineFreq::kMin60: return "60min";
+        case KlineFreq::kDay:   return "day";
+        default:                return "unknown";
+    }
+}
+
+// Human-readable label for any data_type byte value
+inline const char* data_type_label(uint8_t data_type) noexcept {
+    KlineFreq freq;
+    if (data_type == 1) return "tick";
+    if (data_type_to_kline_freq(data_type, freq)) return kline_freq_label(freq);
+    return "unknown";
+}
+
 enum class DataField : uint8_t {
     kTimestamp = 255,  // special field for timestamp column
     kOpen   = 0,

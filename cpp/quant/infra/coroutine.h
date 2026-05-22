@@ -10,10 +10,12 @@
 #include <folly/coro/Sleep.h>
 #include <folly/coro/AsyncScope.h>
 #include <folly/coro/CurrentExecutor.h>
+#include <folly/coro/Coroutine.h>
 #include "affinity_baton.h"
 #include "affinity_mutex.h"
 #include "affinity_shared_mutex.h"
 #include <folly/coro/BlockingWait.h>
+#include <folly/coro/UnboundedQueue.h>
 #include <folly/futures/Future.h>
 
 namespace quant::infra {

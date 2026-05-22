@@ -39,6 +39,7 @@ public:
 
     const StrategyEntry* find(uint64_t id) const;
     const StrategyEntry* find_by_name(const std::string& name) const;
+    const StrategyEntry* find_by_id(uint64_t id) const;
     std::vector<StrategyEntry> list_strategies() const;
     std::vector<StrategyEntry> list_by_status(StrategyStatus status) const;
 
