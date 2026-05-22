@@ -107,7 +107,8 @@ docs 目录下集中了系统的设计文档，以及多轮人→AI 的交互讨
 
 ## 性能基准
 
-> 测试环境: Linux 6.17, x86_64, GCC 12, 4 worker 线程 (详见 [benchmark_report.md](docs/benchmark_report.md))
+> **测试环境**: Ubuntu 24.04, Linux 6.17, x86_64 | AMD Ryzen 9 7950X (16C/32T, L3 64MB) | 96 GB DDR5 | GCC 14.2
+> 详见 [benchmark_report.md](docs/benchmark_report.md)
 
 | 组件 | 吞吐量 | 延迟 |
 |------|--------|------|
