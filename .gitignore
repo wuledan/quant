@@ -38,3 +38,6 @@ bazel-*
 .cache/
 build_debug/
 .cache/
+
+# Docker deployment data
+deploy/data/
