@@ -105,6 +105,7 @@ add_library(quant_infra
     cpp/quant/infra/work_stealing_executor.cc
     cpp/quant/infra/time_utils.cc
     cpp/quant/infra/affinity_baton.cc
+    cpp/quant/infra/affinity_mutex.cc
     cpp/quant/infra/timer_scheduler.cc
 )
 
@@ -175,6 +176,8 @@ add_library(quant_storage
     cpp/quant/storage/disk_persistence.cc
     cpp/quant/storage/storage_engine.cc
     cpp/quant/storage/data_initializer.cc
+    cpp/quant/storage/write_ahead_log.cc
+    cpp/quant/storage/write_buffer.cc
 )
 target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_storage PUBLIC quant_event quant_network)
@@ -417,6 +420,11 @@ add_test(NAME execution_dag_test COMMAND execution_dag_test)
 add_executable(affinity_baton_test cpp/test/affinity_baton_test.cc)
 target_link_libraries(affinity_baton_test PRIVATE quant_infra GTest::gtest_main)
 add_test(NAME affinity_baton_test COMMAND affinity_baton_test)
+
+# ── AffinityMutex test ──
+add_executable(affinity_mutex_test cpp/test/affinity_mutex_test.cc)
+target_link_libraries(affinity_mutex_test PRIVATE quant_infra GTest::gtest_main)
+add_test(NAME affinity_mutex_test COMMAND affinity_mutex_test)
 
 # ── Coroutine and thread-local stats tests ──
 add_executable(coroutine_test cpp/test/coroutine_test.cc)

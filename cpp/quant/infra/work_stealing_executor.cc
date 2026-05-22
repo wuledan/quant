@@ -45,6 +45,10 @@ bool WorkStealingExecutor::is_pool_worker() {
     return tl_worker_id != kExternalThread;
 }
 
+WorkStealingExecutor* WorkStealingExecutor::current_executor() {
+    return tl_executor;
+}
+
 // ── Construction / destruction ──
 
 WorkStealingExecutor::WorkStealingExecutor(

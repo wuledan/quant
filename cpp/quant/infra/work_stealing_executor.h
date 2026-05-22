@@ -73,6 +73,11 @@ public:
     static bool is_pool_worker();
     static constexpr size_t kExternalThread = SIZE_MAX;
 
+    // ── Current executor (thread-local) ──
+    // Returns the WorkStealingExecutor running on the current thread,
+    // or nullptr if not on a pool worker thread.
+    static WorkStealingExecutor* current_executor();
+
     // ── Statistics ──
     struct Stats {
         uint64_t tasks_submitted{0};

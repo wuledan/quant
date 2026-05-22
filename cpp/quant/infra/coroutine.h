@@ -6,12 +6,12 @@
 #pragma once
 
 #include <folly/coro/Task.h>
-#include <folly/coro/Mutex.h>
 #include <folly/coro/Collect.h>
 #include <folly/coro/Sleep.h>
 #include <folly/coro/AsyncScope.h>
 #include <folly/coro/CurrentExecutor.h>
 #include "affinity_baton.h"
+#include "affinity_mutex.h"
 #include <folly/coro/BlockingWait.h>
 #include <folly/futures/Future.h>
 
@@ -24,7 +24,7 @@ using CoTask = folly::coro::Task<T>;
 // ── Coroutine synchronization ──
 using CoBaton = AffinityBaton;
 
-using CoMutex = folly::coro::Mutex;
+using CoMutex = AffinityMutex;
 // CoSemaphore removed in Folly v2025; use BoundedQueue/UnboundedQueue instead if needed
 using AsyncScope = folly::coro::AsyncScope;
 
