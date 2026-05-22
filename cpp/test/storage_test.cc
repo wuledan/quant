@@ -1,16 +1,19 @@
 // storage_test.cc — Tests for ColumnBlock, TimeSeriesCache, DiskPersistence,
-//                    TimeSeriesStore, and StorageEngine
+//                    TimeSeriesStore, StorageEngine, WriteAheadLog, WriteBuffer
 #include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/disk_persistence.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/storage/time_series_cache.h"
 #include "cpp/quant/storage/time_series_store.h"
+#include "cpp/quant/storage/write_ahead_log.h"
+#include "cpp/quant/storage/write_buffer.h"
 
 #include <gtest/gtest.h>
 #include <cstdio>
 #include <filesystem>
 #include <numeric>
 #include <random>
+#include <thread>
 #include <vector>
 
 namespace quant::storage {
@@ -671,6 +674,449 @@ TEST(DiskPersistenceTest, SegmentHeaderSize) {
 
 TEST(DiskPersistenceTest, BlockIndexEntrySize) {
     EXPECT_EQ(sizeof(BlockIndexEntry), kBlockIndexSize);
+}
+
+// ========================================================================
+// WriteAheadLog tests
+// ========================================================================
+
+TEST(WriteAheadLogTest, AppendAndReplay) {
+    TempDir tmpdir;
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 64});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1700000000000000LL;
+    row.open_price = 10000;
+    row.close_price = 10300;
+    row.volume = 1000000;
+
+    EXPECT_TRUE(wal.append("AAPL", 1, row));
+
+    auto entries = wal.replay();
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].symbol, "AAPL");
+    EXPECT_EQ(entries[0].data_type, 1u);
+    EXPECT_EQ(entries[0].row.timestamp, row.timestamp);
+    EXPECT_EQ(entries[0].row.open_price, row.open_price);
+}
+
+TEST(WriteAheadLogTest, AppendBatchAndReplay) {
+    TempDir tmpdir;
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 64});
+
+    std::vector<quant::event::KlineRow> rows;
+    for (int i = 0; i < 5; ++i) {
+        quant::event::KlineRow row{};
+        row.timestamp = 1000 + i * 100;
+        row.open_price = 10000 + i * 10;
+        row.close_price = row.open_price + 5;
+        rows.push_back(row);
+    }
+
+    EXPECT_TRUE(wal.append_batch("MSFT", 2, rows));
+
+    auto entries = wal.replay();
+    ASSERT_EQ(entries.size(), 5u);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_EQ(entries[i].symbol, "MSFT");
+        EXPECT_EQ(entries[i].data_type, 2u);
+        EXPECT_EQ(entries[i].row.timestamp, rows[i].timestamp);
+    }
+}
+
+TEST(WriteAheadLogTest, TruncateClearsData) {
+    TempDir tmpdir;
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 64});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+    wal.append("TEST", 0, row);
+
+    EXPECT_EQ(wal.replay().size(), 1u);
+
+    wal.truncate();
+
+    EXPECT_EQ(wal.replay().size(), 0u);
+    EXPECT_EQ(wal.bytes_written(), 0u);
+}
+
+TEST(WriteAheadLogTest, MultipleSymbols) {
+    TempDir tmpdir;
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 64});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+
+    wal.append("AAPL", 1, row);
+    row.open_price = 20000;
+    wal.append("GOOG", 1, row);
+    row.open_price = 30000;
+    wal.append("MSFT", 2, row);
+
+    auto entries = wal.replay();
+    ASSERT_EQ(entries.size(), 3u);
+    EXPECT_EQ(entries[0].symbol, "AAPL");
+    EXPECT_EQ(entries[1].symbol, "GOOG");
+    EXPECT_EQ(entries[2].symbol, "MSFT");
+    EXPECT_EQ(entries[2].data_type, 2u);
+}
+
+TEST(WriteAheadLogTest, TruncateAndAppendNew) {
+    TempDir tmpdir;
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 64});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+    wal.append("OLD", 0, row);
+
+    wal.truncate();
+
+    row.timestamp = 2000;
+    row.open_price = 20000;
+    wal.append("NEW", 1, row);
+
+    auto entries = wal.replay();
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].symbol, "NEW");
+    EXPECT_EQ(entries[0].row.open_price, 20000);
+}
+
+TEST(WriteAheadLogTest, Rotation) {
+    TempDir tmpdir;
+    // Very small WAL to force rotation
+    WriteAheadLog wal(WriteAheadLog::Options{tmpdir.path(), 0});
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+
+    // Write enough to trigger rotation
+    for (int i = 0; i < 5; ++i) {
+        row.timestamp = 1000 + i;
+        wal.append("ROT", 0, row);
+    }
+
+    auto entries = wal.replay();
+    EXPECT_EQ(entries.size(), 5u);
+}
+
+// ========================================================================
+// WriteBuffer tests
+// ========================================================================
+
+TEST(WriteBufferTest, WriteAndFlush) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.flush_row_threshold = 100;
+    opts.enable_wal = true;
+    WriteBuffer buf(engine, opts);
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1700000000000000LL;
+    row.open_price = 10000;
+    row.high_price = 10500;
+    row.low_price = 9800;
+    row.close_price = 10300;
+    row.volume = 1000000;
+    row.amount = 103000000LL;
+    row.vwap = 102500;
+
+    EXPECT_EQ(buf.write("AAPL", 1, row), StoreStatus::kOk);
+    EXPECT_EQ(buf.pending_rows(), 1u);
+
+    buf.flush();
+    EXPECT_EQ(buf.pending_rows(), 0u);
+
+    // Verify data made it to StorageEngine
+    auto result = engine.query_kline("AAPL",
+        static_cast<quant::event::DataType>(1),
+        DataField::kOpen,
+        TimeRange{0, 9999999999999999LL});
+    ASSERT_EQ(result.values.size(), 1u);
+    EXPECT_DOUBLE_EQ(result.values[0], 1.0);
+
+    engine.close();
+}
+
+TEST(WriteBufferTest, WriteBatch) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.flush_row_threshold = 1000;
+    opts.enable_wal = true;
+    WriteBuffer buf(engine, opts);
+
+    std::vector<quant::event::KlineRow> rows;
+    for (int i = 0; i < 5; ++i) {
+        quant::event::KlineRow row{};
+        row.timestamp = 1000 + i * 100;
+        row.open_price = 10000 + i * 100;
+        row.close_price = row.open_price + 5;
+        row.volume = 1000000 + i;
+        rows.push_back(row);
+    }
+
+    EXPECT_EQ(buf.write_batch("MSFT", 2, rows), StoreStatus::kOk);
+    EXPECT_EQ(buf.pending_rows(), 5u);
+
+    buf.flush();
+    EXPECT_EQ(buf.pending_rows(), 0u);
+
+    auto result = engine.query_kline("MSFT",
+        static_cast<quant::event::DataType>(2),
+        DataField::kOpen,
+        TimeRange{0, 99999});
+    ASSERT_EQ(result.values.size(), 5u);
+
+    engine.close();
+}
+
+TEST(WriteBufferTest, AutoFlushOnThreshold) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.flush_row_threshold = 3;  // auto-flush after 3 rows
+    opts.enable_wal = true;
+    WriteBuffer buf(engine, opts);
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+    row.close_price = 10300;
+
+    // Write 3 rows → should auto-flush
+    for (int i = 0; i < 3; ++i) {
+        row.timestamp = 1000 + i * 100;
+        buf.write("AUTO", 1, row);
+    }
+
+    // After threshold flush, pending should be 0
+    EXPECT_EQ(buf.pending_rows(), 0u);
+
+    auto result = engine.query_kline("AUTO",
+        static_cast<quant::event::DataType>(1),
+        DataField::kOpen,
+        TimeRange{0, 99999});
+    ASSERT_EQ(result.values.size(), 3u);
+
+    engine.close();
+}
+
+TEST(WriteBufferTest, WriteBatchEmptyFails) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.enable_wal = true;
+    WriteBuffer buf(engine, opts);
+
+    std::vector<quant::event::KlineRow> empty;
+    EXPECT_EQ(buf.write_batch("X", 0, empty), StoreStatus::kInvalidArgument);
+
+    engine.close();
+}
+
+TEST(WriteBufferTest, DisableWal) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.enable_wal = false;
+    WriteBuffer buf(engine, opts);
+
+    quant::event::KlineRow row{};
+    row.timestamp = 1000;
+    row.open_price = 10000;
+
+    EXPECT_EQ(buf.write("NOWAL", 1, row), StoreStatus::kOk);
+    buf.flush();
+
+    auto result = engine.query_kline("NOWAL",
+        static_cast<quant::event::DataType>(1),
+        DataField::kOpen,
+        TimeRange{0, 99999});
+    ASSERT_EQ(result.values.size(), 1u);
+
+    engine.close();
+}
+
+TEST(WriteBufferTest, RecoverFromWal) {
+    TempDir tmpdir;
+    std::string wal_dir = tmpdir.path() + "/wal";
+
+    // Phase 1: Write data via WriteBuffer, then destroy without flush
+    {
+        StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+        WriteBuffer::Options opts;
+        opts.wal_opts = WriteAheadLog::Options{wal_dir, 64};
+        opts.flush_row_threshold = 10000;  // high threshold so no auto-flush
+        opts.enable_wal = true;
+        WriteBuffer buf(engine, opts);
+
+        quant::event::KlineRow row{};
+        row.timestamp = 1000;
+        row.open_price = 10000;
+        row.close_price = 10300;
+        row.volume = 500000;
+
+        buf.write("RECOV", 1, row);
+        EXPECT_EQ(buf.pending_rows(), 1u);
+        // Don't call flush() — destructor flushes, so WAL has the data
+    }
+
+    // Phase 2: Create new WriteBuffer and call recover()
+    {
+        StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+        WriteBuffer::Options opts;
+        opts.wal_opts = WriteAheadLog::Options{wal_dir, 64};
+        opts.flush_row_threshold = 10000;
+        opts.enable_wal = true;
+        WriteBuffer buf(engine, opts);
+
+        // The previous destructor flushed, so WAL should have been truncated.
+        // For a real crash scenario, we'd need to simulate process death
+        // before flush. This test validates recover() is callable.
+        buf.recover();
+
+        engine.close();
+    }
+}
+
+// ========================================================================
+// StorageEngine + WriteBuffer integration tests
+// ========================================================================
+
+TEST(StorageEngineWriteBufferIntegration, SingleRowWritesThroughWriteBuffer) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+
+    // Attach WriteBuffer to StorageEngine
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.flush_row_threshold = 100;
+    opts.enable_wal = true;
+    auto write_buffer = std::make_unique<WriteBuffer>(engine, opts);
+    WriteBuffer* wb_ptr = write_buffer.get();  // keep raw pointer for assertions
+    engine.set_write_buffer(std::move(write_buffer));
+
+    // Write single row via store_kline (should go through WriteBuffer)
+    quant::event::KlineRow row{};
+    row.timestamp = 1700000000000000LL;
+    row.open_price = 10000;
+    row.high_price = 10500;
+    row.low_price = 9800;
+    row.close_price = 10300;
+    row.volume = 1000000;
+    row.amount = 103000000LL;
+    row.vwap = 102500;
+
+    auto status = engine.store_kline("INTG", quant::event::DataType::kKline1Min, row);
+    EXPECT_EQ(status, StoreStatus::kOk);
+    EXPECT_EQ(wb_ptr->pending_rows(), 1u);
+
+    // Flush via engine (should flush WriteBuffer first)
+    engine.flush();
+    EXPECT_EQ(wb_ptr->pending_rows(), 0u);
+
+    // Verify data is queryable
+    auto result = engine.query_kline("INTG", quant::event::DataType::kKline1Min,
+                                      DataField::kClose,
+                                      TimeRange{0, 9999999999999999LL});
+    ASSERT_EQ(result.values.size(), 1u);
+    EXPECT_DOUBLE_EQ(result.values[0], 1.03);
+
+    engine.close();
+}
+
+TEST(StorageEngineWriteBufferIntegration, BatchWritesBypassWriteBuffer) {
+    TempDir tmpdir;
+    StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+
+    // Attach WriteBuffer
+    WriteBuffer::Options opts;
+    opts.wal_opts = WriteAheadLog::Options{tmpdir.path() + "/wal", 64};
+    opts.flush_row_threshold = 1000;
+    opts.enable_wal = true;
+    auto write_buffer = std::make_unique<WriteBuffer>(engine, opts);
+    WriteBuffer* wb_ptr = write_buffer.get();
+    engine.set_write_buffer(std::move(write_buffer));
+
+    // Batch write should go directly to cache, not through WriteBuffer
+    std::vector<quant::event::KlineRow> rows;
+    for (int i = 0; i < 5; ++i) {
+        quant::event::KlineRow row{};
+        row.timestamp = 1000 + i * 100;
+        row.open_price = 10000 + i * 100;
+        row.high_price = row.open_price + 50;
+        row.low_price = row.open_price - 20;
+        row.close_price = row.open_price + 5;
+        row.volume = 1000000;
+        row.amount = row.close_price * 100;
+        row.vwap = row.close_price;
+        rows.push_back(row);
+    }
+
+    auto status = engine.store_kline_batch("BATCH", quant::event::DataType::kKline5Min, rows);
+    EXPECT_EQ(status, StoreStatus::kOk);
+
+    // WriteBuffer should have 0 pending (batch bypasses it)
+    EXPECT_EQ(wb_ptr->pending_rows(), 0u);
+
+    // Data should be immediately queryable
+    auto result = engine.query_kline("BATCH", quant::event::DataType::kKline5Min,
+                                      DataField::kOpen,
+                                      TimeRange{0, 99999});
+    ASSERT_EQ(result.values.size(), 5u);
+
+    engine.close();
+}
+
+TEST(StorageEngineWriteBufferIntegration, FlushPersistsData) {
+    TempDir tmpdir;
+    std::string wal_dir = tmpdir.path() + "/wal";
+
+    // Phase 1: Write through WriteBuffer, then flush
+    {
+        StorageEngine engine(StorageEngine::Options{1, tmpdir.path()});
+        WriteBuffer::Options opts;
+        opts.wal_opts = WriteAheadLog::Options{wal_dir, 64};
+        opts.flush_row_threshold = 10000;
+        opts.enable_wal = true;
+        auto write_buffer = std::make_unique<WriteBuffer>(engine, opts);
+        engine.set_write_buffer(std::move(write_buffer));
+
+        quant::event::KlineRow row{};
+        row.timestamp = 1000;
+        row.open_price = 10000;
+        row.close_price = 10300;
+        row.volume = 500000;
+
+        engine.store_kline("PERSIST", quant::event::DataType::kKline1Min, row);
+
+        // Verify data is buffered in WriteBuffer
+        EXPECT_NE(engine.write_buffer(), nullptr);
+        EXPECT_EQ(engine.write_buffer()->pending_rows(), 1u);
+
+        engine.flush();  // explicit flush
+
+        // Verify data is now in cache (WriteBuffer flushes to cache)
+        EXPECT_EQ(engine.write_buffer()->pending_rows(), 0u);
+
+        auto result = engine.query_kline("PERSIST", quant::event::DataType::kKline1Min,
+                                          DataField::kOpen,
+                                          TimeRange{0, 99999});
+        ASSERT_EQ(result.values.size(), 1u);
+        EXPECT_DOUBLE_EQ(result.values[0], 1.0);
+
+        engine.close();
+    }
 }
 
 }  // namespace

@@ -6,6 +6,7 @@
 
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/network/co_io.h"
+#include "cpp/quant/storage/write_buffer.h"
 
 namespace quant::storage {
 
@@ -20,6 +21,11 @@ StoreStatus StorageEngine::store_kline(
     std::string_view symbol,
     quant::event::DataType kline_type,
     const quant::event::KlineRow& row) {
+    // Route single-row writes through WriteBuffer if attached
+    if (write_buffer_) {
+        return write_buffer_->write(symbol, static_cast<uint8_t>(kline_type), row);
+    }
+
     uint8_t dt = static_cast<uint8_t>(kline_type);
 
     // Timestamp: Delta codec with int64
@@ -52,9 +58,9 @@ StoreStatus StorageEngine::store_kline(
     store_price(DataField::kHigh, row.high_price);
     store_price(DataField::kLow, row.low_price);
     store_price(DataField::kClose, row.close_price);
+    store_price(DataField::kVwap, row.vwap);
     store_scalar(DataField::kVolume, row.volume);
     store_scalar(DataField::kAmount, row.amount);
-    store_scalar(DataField::kVwap, row.vwap);
 
     return StoreStatus::kOk;
 }
@@ -69,17 +75,17 @@ StoreStatus StorageEngine::store_kline_batch(
 
     // Collect per-field arrays
     std::vector<int64_t> timestamps;
-    std::vector<double> opens, highs, lows, closes;
-    std::vector<int64_t> volumes, amounts, vwaps;
+    std::vector<double> opens, highs, lows, closes, vwaps;
+    std::vector<int64_t> volumes, amounts;
 
     timestamps.reserve(rows.size());
     opens.reserve(rows.size());
     highs.reserve(rows.size());
     lows.reserve(rows.size());
     closes.reserve(rows.size());
+    vwaps.reserve(rows.size());
     volumes.reserve(rows.size());
     amounts.reserve(rows.size());
-    vwaps.reserve(rows.size());
 
     int64_t min_ts = INT64_MAX, max_ts = INT64_MIN;
     for (const auto& row : rows) {
@@ -88,9 +94,9 @@ StoreStatus StorageEngine::store_kline_batch(
         highs.push_back(static_cast<double>(row.high_price) / 10000.0);
         lows.push_back(static_cast<double>(row.low_price) / 10000.0);
         closes.push_back(static_cast<double>(row.close_price) / 10000.0);
+        vwaps.push_back(static_cast<double>(row.vwap) / 10000.0);
         volumes.push_back(row.volume);
         amounts.push_back(row.amount);
-        vwaps.push_back(row.vwap);
         min_ts = std::min(min_ts, row.timestamp);
         max_ts = std::max(max_ts, row.timestamp);
     }
@@ -123,9 +129,9 @@ StoreStatus StorageEngine::store_kline_batch(
     store_price_field(DataField::kHigh, highs);
     store_price_field(DataField::kLow, lows);
     store_price_field(DataField::kClose, closes);
+    store_price_field(DataField::kVwap, vwaps);
     store_int_field(DataField::kVolume, volumes);
     store_int_field(DataField::kAmount, amounts);
-    store_int_field(DataField::kVwap, vwaps);
 
     // Timestamps: Delta codec with int64
     store_int_field(DataField::kTimestamp, timestamps);
@@ -146,7 +152,8 @@ StorageEngine::KlineQueryResult StorageEngine::query_kline(
     bool is_price_field = (field == DataField::kOpen ||
                            field == DataField::kHigh ||
                            field == DataField::kLow ||
-                           field == DataField::kClose);
+                           field == DataField::kClose ||
+                           field == DataField::kVwap);
 
     // Decompress all blocks
     for (const auto& block : blocks) {
@@ -187,6 +194,10 @@ StorageEngine::KlineQueryResult StorageEngine::query_kline(
 }
 
 StoreStatus StorageEngine::flush() {
+    // Flush WriteBuffer first to ensure all pending writes are committed
+    if (write_buffer_) {
+        write_buffer_->flush();
+    }
     return store_->flush();
 }
 
@@ -194,6 +205,14 @@ StoreStatus StorageEngine::close() {
     if (closed_) return StoreStatus::kOk;
     closed_ = true;
     return store_->close();
+}
+
+void StorageEngine::set_write_buffer(std::unique_ptr<WriteBuffer> wb) {
+    write_buffer_ = std::move(wb);
+}
+
+WriteBuffer* StorageEngine::write_buffer() noexcept {
+    return write_buffer_.get();
 }
 
 // ── Coroutine API ──
@@ -231,7 +250,8 @@ CoTask<StorageEngine::KlineQueryResult> StorageEngine::co_query_kline(
     bool is_price_field = (field == DataField::kOpen ||
                            field == DataField::kHigh ||
                            field == DataField::kLow ||
-                           field == DataField::kClose);
+                           field == DataField::kClose ||
+                           field == DataField::kVwap);
 
     // 1. Query cache (sync — hot path, in-memory)
     auto cache_blocks = store_->cache().query(symbol, kline_type, field, range);

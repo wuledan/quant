@@ -14,6 +14,9 @@ namespace quant::network { class CoIouring; }
 
 namespace quant::storage {
 
+// Forward declaration to avoid circular include
+class WriteBuffer;
+
 using infra::CoTask;
 
 // ── StorageEngine: unified data storage facade ──
@@ -60,6 +63,12 @@ public:
     StoreStatus flush();
     StoreStatus close();
 
+    // ── WriteBuffer integration ──
+    // Attach a WriteBuffer for buffered single-row writes with WAL.
+    // Single-row store_kline() calls will go through WriteBuffer if set.
+    void set_write_buffer(std::unique_ptr<WriteBuffer> wb);
+    WriteBuffer* write_buffer() noexcept;
+
     // ── Access underlying store ──
     TimeSeriesStore& store() noexcept { return *store_; }
 
@@ -87,6 +96,7 @@ public:
 private:
     Options opts_;
     std::unique_ptr<TimeSeriesStore> store_;
+    std::unique_ptr<WriteBuffer> write_buffer_;
     bool closed_ = false;
 };
 

@@ -29,6 +29,8 @@
 #include "cpp/quant/scheduler/scheduler_service.h"
 #include "cpp/quant/storage/data_initializer.h"
 #include "cpp/quant/storage/storage_engine.h"
+#include "cpp/quant/storage/write_ahead_log.h"
+#include "cpp/quant/storage/write_buffer.h"
 #include "cpp/quant/strategy/strategy_engine.h"
 
 using namespace quant;
@@ -59,6 +61,23 @@ int main(int argc, char* argv[]) {
     storage_opts.cache_budget_mb = 256;
     storage::StorageEngine storage(storage_opts);
     std::cout << "[Service] StorageEngine created (data_dir=./data, cache_budget=256MB)\n";
+
+    // ── 2.5 Create WriteBuffer with WAL for buffered writes ──
+    storage::WriteBuffer::Options wb_opts;
+    wb_opts.wal_opts = storage::WriteAheadLog::Options{"./data/wal", 64};
+    wb_opts.flush_row_threshold = 8192;        // flush after 8K rows
+    wb_opts.flush_interval = std::chrono::seconds(5);  // or every 5 seconds
+    wb_opts.enable_wal = true;
+    auto write_buffer = std::make_unique<storage::WriteBuffer>(storage, wb_opts);
+    std::cout << "[Service] WriteBuffer created (WAL=./data/wal, flush_threshold=8192, flush_interval=5s)\n";
+
+    // Recover any uncommitted data from WAL (crash recovery)
+    write_buffer->recover();
+    std::cout << "[Service] WAL recovery completed\n";
+
+    // Attach WriteBuffer to StorageEngine
+    storage.set_write_buffer(std::move(write_buffer));
+    std::cout << "[Service] WriteBuffer attached to StorageEngine\n";
 
     // ── Load historical data from CSV ──
     storage::DataInitializer data_init(storage);
@@ -106,7 +125,7 @@ int main(int argc, char* argv[]) {
 
     // ── 8. Create HttpServer for REST API ──
     network::HttpServerConfig http_config;
-    http_config.port = 9090;
+    http_config.port = 9191;
     http_config.host = "0.0.0.0";
 
     network::HttpServer http_server(http_config);
@@ -119,16 +138,16 @@ int main(int argc, char* argv[]) {
     });
 
     http_server.start();
-    std::cout << "[Service] HttpServer started (port=9090)\n";
+    std::cout << "[Service] HttpServer started (port=9191)\n";
 
     // ── 9. Create WebSocketServer ──
     network::WsServerConfig ws_config;
-    ws_config.port = 8080;
+    ws_config.port = 8282;
     ws_config.host = "0.0.0.0";
     ws_config.max_connections = 1000;
 
     network::WebSocketServer ws_server(ws_config);
-    std::cout << "[Service] WebSocketServer created (port=8080)\n";
+    std::cout << "[Service] WebSocketServer created (port=8282)\n";
 
     // ── Start WebSocketServer ──
     ws_server.start();
