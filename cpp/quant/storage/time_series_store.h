@@ -4,9 +4,11 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "cpp/quant/infra/coroutine.h"
+#include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/disk_persistence.h"
 #include "cpp/quant/storage/time_series_cache.h"
 
@@ -58,10 +60,30 @@ public:
     StoreStatus flush();
     StoreStatus close();
 
+    // Exposed for testing: current pending rows ready for disk flush
+    size_t pending_disk_rows() const noexcept;
+
 private:
+    static constexpr size_t kFlushThreshold = 8192;
+
+    // Pending rows waiting to be written to disk, keyed by symbol+"\0"+data_type
+    struct PendingDisk {
+        std::vector<KlineRow> rows;
+        int64_t min_ts = INT64_MAX;
+        int64_t max_ts = INT64_MIN;
+    };
+
+    // Convert a batch of KlineRow into 8 ColumnBlocks for segment write
+    static std::vector<ColumnBlock> rows_to_column_blocks(const std::vector<KlineRow>& rows);
+
+    // Flush accumulated rows for a (symbol, data_type) to a disk segment
+    CoTask<void> flush_to_disk(const std::string& symbol, uint8_t data_type,
+                               PendingDisk& batch);
+
     Options opts_;
     std::unique_ptr<TimeSeriesCache> cache_;
     std::unique_ptr<DiskPersistence> disk_;
+    std::unordered_map<std::string, PendingDisk> pending_disk_;
     bool closed_ = false;
 };
 

@@ -5,11 +5,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
-#include <mutex>
 #include <queue>
-#include <shared_mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -28,10 +25,9 @@ public:
 
     ~Impl() {
         {
-            std::lock_guard lock(queue_mutex_);
+            auto lock = blockingWait(queue_mutex_.co_scoped_lock());
             stop_.store(true, std::memory_order_release);
         }
-        cv_.notify_one();
         if (flush_thread_.joinable()) {
             flush_thread_.join();
         }
@@ -39,18 +35,18 @@ public:
     }
 
     void add_sink(std::unique_ptr<LogSink> sink) {
-        std::lock_guard lock(sink_mutex_);
+        auto lock = blockingWait(sink_mutex_.co_scoped_lock());
         sinks_.push_back(std::move(sink));
     }
 
     void remove_sinks() {
-        std::lock_guard lock(sink_mutex_);
+        auto lock = blockingWait(sink_mutex_.co_scoped_lock());
         sinks_.clear();
     }
 
     void enqueue(LogRecord record) {
         {
-            std::lock_guard lock(queue_mutex_);
+            auto lock = blockingWait(queue_mutex_.co_scoped_lock());
             if (queue_.size() >= kMaxQueueSize) {
                 dropped_.fetch_add(1, std::memory_order_relaxed);
                 return;
@@ -58,13 +54,12 @@ public:
             queue_.push(std::move(record));
             count_.fetch_add(1, std::memory_order_relaxed);
         }
-        cv_.notify_one();
     }
 
     void flush_all() {
         std::vector<LogRecord> batch;
         {
-            std::lock_guard lock(queue_mutex_);
+            auto lock = blockingWait(queue_mutex_.co_scoped_lock());
             batch.reserve(queue_.size());
             while (!queue_.empty()) {
                 batch.push_back(std::move(queue_.front()));
@@ -72,7 +67,7 @@ public:
             }
         }
         if (!batch.empty()) {
-            std::shared_lock lock(sink_mutex_);
+            auto lock = blockingWait(sink_mutex_.co_scoped_shared_lock());
             for (const auto& record : batch) {
                 for (auto& sink : sinks_) {
                     sink->write(record);
@@ -92,10 +87,9 @@ public:
         // Stop the background thread if running
         if (flush_thread_.joinable()) {
             {
-                std::lock_guard lock(queue_mutex_);
+                auto lock = blockingWait(queue_mutex_.co_scoped_lock());
                 stop_.store(true, std::memory_order_release);
             }
-            cv_.notify_one();
             flush_thread_.join();
         }
 
@@ -111,7 +105,7 @@ public:
 
             // If queue is empty, suspend until signaled
             {
-                std::lock_guard lock(queue_mutex_);
+                auto lock = blockingWait(queue_mutex_.co_scoped_lock());
                 if (queue_.empty()) {
                     // Release the lock before suspending
                 }
@@ -150,25 +144,21 @@ private:
 
     void flush_loop() {
         while (!stop_.load(std::memory_order_acquire)) {
-            {
-                std::unique_lock lock(queue_mutex_);
-                cv_.wait_for(lock, std::chrono::milliseconds(1),
-                             [this] { return stop_.load(std::memory_order_acquire)
-                                           || !queue_.empty(); });
-            }
             flush_all();
+            if (!stop_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
         }
     }
 
     std::string name_;
     std::queue<LogRecord> queue_;
-    mutable std::mutex queue_mutex_;
-    std::condition_variable cv_;
+    mutable AffinityMutex queue_mutex_;
     std::atomic<bool> stop_{false};
     std::thread flush_thread_;
 
     std::vector<std::unique_ptr<LogSink>> sinks_;
-    mutable std::shared_mutex sink_mutex_;
+    mutable AffinitySharedMutex sink_mutex_;
 
     std::atomic<uint64_t> count_{0};
     std::atomic<uint64_t> dropped_{0};

@@ -8,6 +8,7 @@
 // Sync API:      append, append_batch, query (blockingWait wrappers)
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -44,6 +45,8 @@ public:
     struct Options {
         size_t num_shards = 16;
         size_t budget_mb = 256;
+
+        size_t budget() const noexcept { return budget_mb * 1024 * 1024; }
     };
 
     explicit TimeSeriesCache(Options opts);
@@ -95,9 +98,13 @@ private:
 
     size_t shard_index(std::string_view symbol, uint8_t data_type) const;
 
+    // Evict oldest entries from a shard when over budget
+    void evict_if_needed(Shard& shard);
+
     Options opts_;
     // unique_ptr because Shard (containing AffinitySharedMutex) is non-movable
     std::vector<std::unique_ptr<Shard>> shards_;
+    std::atomic<size_t> total_memory_{0};
 };
 
 }  // namespace quant::storage

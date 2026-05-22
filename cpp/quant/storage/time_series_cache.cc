@@ -2,7 +2,9 @@
 #include "cpp/quant/storage/time_series_cache.h"
 
 #include <algorithm>
+#include <chrono>
 #include <thread>
+#include <utility>
 
 #include "cpp/quant/infra/coroutine.h"
 
@@ -40,6 +42,12 @@ CoTask<void> TimeSeriesCache::co_append(
                                });
     entry.rows.insert(it, std::move(row));
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, row.timestamp);
+
+    // Track memory: one more row of 48 bytes
+    entry.meta.approx_bytes = entry.rows.size() * sizeof(KlineRow) + key.symbol.size();
+    total_memory_.fetch_add(sizeof(KlineRow), std::memory_order_relaxed);
+
+    evict_if_needed(shard);
     co_return;
 }
 
@@ -70,6 +78,13 @@ CoTask<void> TimeSeriesCache::co_append_batch(
         existing.insert(it, std::move(r));
     }
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, max_ts);
+
+    // Track memory: added rows * sizeof(KlineRow)
+    size_t added_bytes = rows.size() * sizeof(KlineRow);
+    entry.meta.approx_bytes = existing.size() * sizeof(KlineRow) + key.symbol.size();
+    total_memory_.fetch_add(added_bytes, std::memory_order_relaxed);
+
+    evict_if_needed(shard);
     co_return;
 }
 
@@ -83,6 +98,11 @@ CoTask<std::vector<KlineRow>> TimeSeriesCache::co_query(
     ShardKey key{std::string(symbol), data_type};
     auto it = shard.entries.find(key);
     if (it == shard.entries.end()) co_return {};
+
+    // Update access timestamp for eviction priority
+    it->second.meta.last_access_ts = std::max(it->second.meta.last_access_ts,
+                                               std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch()).count());
 
     const auto& rows = it->second.rows;
     if (rows.empty()) co_return {};
@@ -126,6 +146,11 @@ void TimeSeriesCache::append(std::string_view symbol, uint8_t data_type, KlineRo
     entry.rows.insert(it, std::move(row));
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, row.timestamp);
 
+    // Track memory and evict if over budget
+    entry.meta.approx_bytes = entry.rows.size() * sizeof(KlineRow) + key.symbol.size();
+    total_memory_.fetch_add(sizeof(KlineRow), std::memory_order_relaxed);
+    evict_if_needed(shard);
+
     shard.rwlock.unlock();
 }
 
@@ -159,6 +184,12 @@ void TimeSeriesCache::append_batch(std::string_view symbol, uint8_t data_type,
     }
     entry.meta.last_access_ts = std::max(entry.meta.last_access_ts, max_ts);
 
+    // Track memory and evict if over budget
+    size_t added_bytes = rows.size() * sizeof(KlineRow);
+    entry.meta.approx_bytes = existing.size() * sizeof(KlineRow) + key.symbol.size();
+    total_memory_.fetch_add(added_bytes, std::memory_order_relaxed);
+    evict_if_needed(shard);
+
     shard.rwlock.unlock();
 }
 
@@ -178,6 +209,11 @@ std::vector<KlineRow> TimeSeriesCache::query(std::string_view symbol, uint8_t da
         return {};
     }
 
+    // Update access timestamp for eviction priority
+    it->second.meta.last_access_ts = std::max(it->second.meta.last_access_ts,
+                                               std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch()).count());
+
     const auto& rows = it->second.rows;
     std::vector<KlineRow> result;
 
@@ -195,6 +231,38 @@ std::vector<KlineRow> TimeSeriesCache::query(std::string_view symbol, uint8_t da
 
     shard.rwlock.unlock_shared();
     return result;
+}
+
+// ── Eviction ──
+
+void TimeSeriesCache::evict_if_needed(Shard& shard) {
+    size_t current = total_memory_.load(std::memory_order_relaxed);
+    size_t budget = opts_.budget();
+    if (current <= budget) return;
+
+    size_t target = static_cast<size_t>(budget * 0.8);
+
+    // Collect candidate entries from this shard, sorted by last_access_ts (oldest first)
+    std::vector<std::pair<int64_t /* last_access */, ShardKey>> candidates;
+    candidates.reserve(shard.entries.size());
+    for (const auto& [key, entry] : shard.entries) {
+        candidates.emplace_back(entry.meta.last_access_ts, key);
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Evict oldest entries until under target
+    for (const auto& [access_ts, key] : candidates) {
+        if (total_memory_.load(std::memory_order_relaxed) <= target) break;
+        (void)access_ts;
+
+        auto it = shard.entries.find(key);
+        if (it == shard.entries.end()) continue;
+
+        size_t freed = it->second.meta.approx_bytes;
+        shard.entries.erase(it);
+        total_memory_.fetch_sub(freed, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace quant::storage

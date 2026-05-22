@@ -5,11 +5,12 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "cpp/quant/infra/affinity_mutex.h"
 
 namespace quant::network {
 
@@ -62,7 +63,7 @@ public:
 
 private:
     std::string generate_session_id();
-    mutable std::mutex mutex_;
+    mutable infra::AffinityMutex mutex_;
     std::unordered_map<std::string, SessionInfo> sessions_;
     std::unordered_map<std::string, std::vector<std::string>> topic_subscribers_;
     SessionCallbacks callbacks_;

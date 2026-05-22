@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
-#include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -23,7 +22,7 @@ struct WebSocketServer::Impl {
     std::map<int, std::string> fd_to_session;    // socket fd -> session id
     std::map<std::string, int> session_to_fd;    // session id -> socket fd
     std::map<std::string, IoBuffer> session_buffers;
-    mutable std::mutex mutex;
+    mutable infra::AffinityMutex mutex;
     std::thread accept_thread;
     std::atomic<bool> stop{false};
 };
@@ -89,7 +88,7 @@ void WebSocketServer::broadcast(const std::string& message) {
 }
 
 bool WebSocketServer::close_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto lock = infra::blockingWait(impl_->mutex.co_scoped_lock());
     auto it = impl_->session_to_fd.find(session_id);
     if (it != impl_->session_to_fd.end()) {
         ::close(it->second);
@@ -103,7 +102,7 @@ bool WebSocketServer::close_session(const std::string& session_id) {
 }
 
 size_t WebSocketServer::session_count() const noexcept {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto lock = infra::blockingWait(impl_->mutex.co_scoped_lock());
     return impl_->session_to_fd.size();
 }
 
@@ -157,7 +156,7 @@ CoTask<bool> WebSocketServer::co_send(const std::string& session_id, const std::
     // holding std::mutex across co_await (undefined behavior).
     int target_fd = -1;
     if (ring_ != nullptr) {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto lock = infra::blockingWait(impl_->mutex.co_scoped_lock());
         auto it = impl_->session_to_fd.find(session_id);
         if (it != impl_->session_to_fd.end()) {
             target_fd = it->second;
@@ -178,7 +177,7 @@ CoTask<bool> WebSocketServer::co_send_binary(const std::string& session_id, cons
     // Extract target fd under lock, then send outside lock.
     int target_fd = -1;
     if (ring_ != nullptr) {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto lock = infra::blockingWait(impl_->mutex.co_scoped_lock());
         auto it = impl_->session_to_fd.find(session_id);
         if (it != impl_->session_to_fd.end()) {
             target_fd = it->second;
@@ -202,7 +201,7 @@ CoTask<void> WebSocketServer::co_broadcast(const std::string& message) {
         // Collect all target fds under lock, then send outside lock.
         std::vector<int> targets;
         {
-            std::lock_guard<std::mutex> lock(impl_->mutex);
+            auto lock = infra::blockingWait(impl_->mutex.co_scoped_lock());
             targets.reserve(impl_->fd_to_session.size());
             for (const auto& [fid, sid] : impl_->fd_to_session) {
                 targets.push_back(fid);

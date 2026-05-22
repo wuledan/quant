@@ -5,8 +5,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <shared_mutex>
 #include <string>
+
+#include "affinity_shared_mutex.h"
 #include <string_view>
 #include <vector>
 
@@ -133,7 +134,7 @@ private:
     std::vector<std::unique_ptr<Counter>> counters_;
     std::vector<std::unique_ptr<Gauge>> gauges_;
     std::vector<std::unique_ptr<Histogram>> histograms_;
-    mutable std::shared_mutex mutex_;
+    mutable AffinitySharedMutex mutex_;
 };
 
 }  // namespace quant::infra

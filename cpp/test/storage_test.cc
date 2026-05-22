@@ -306,6 +306,7 @@ TEST(WriteAheadLogTest, AppendAndReplay) {
 TEST(WriteAheadLogTest, AppendBatch) {
     WriteAheadLog::Options opts{"/tmp/wal_batch_test", 1};
     WriteAheadLog wal(opts);
+    wal.truncate();  // clean any leftover from previous runs
 
     std::vector<KlineRow> rows;
     for (int i = 0; i < 5; ++i) {

@@ -5,8 +5,9 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
-#include <mutex>
 #include <sstream>
+
+#include "coroutine.h"
 
 namespace quant::infra {
 
@@ -119,13 +120,13 @@ MetricsRegistry& MetricsRegistry::instance() {
 }
 
 Counter& MetricsRegistry::counter(std::string_view name, std::string_view help) {
-    std::unique_lock lock(mutex_);
+    auto lock = blockingWait(mutex_.co_scoped_lock());
     counters_.push_back(std::make_unique<Counter>(name, help));
     return *counters_.back();
 }
 
 Gauge& MetricsRegistry::gauge(std::string_view name, std::string_view help) {
-    std::unique_lock lock(mutex_);
+    auto lock = blockingWait(mutex_.co_scoped_lock());
     gauges_.push_back(std::make_unique<Gauge>(name, help));
     return *gauges_.back();
 }
@@ -133,7 +134,7 @@ Gauge& MetricsRegistry::gauge(std::string_view name, std::string_view help) {
 Histogram& MetricsRegistry::histogram(std::string_view name,
                                         std::vector<double> boundaries,
                                         std::string_view help) {
-    std::unique_lock lock(mutex_);
+    auto lock = blockingWait(mutex_.co_scoped_lock());
     histograms_.push_back(
         std::make_unique<Histogram>(name, std::move(boundaries), help));
     return *histograms_.back();
@@ -141,7 +142,7 @@ Histogram& MetricsRegistry::histogram(std::string_view name,
 
 std::string MetricsRegistry::to_prometheus() const {
     std::ostringstream oss;
-    std::shared_lock lock(mutex_);
+    auto lock = blockingWait(mutex_.co_scoped_shared_lock());
 
     for (const auto& c : counters_) {
         oss << "# HELP " << c->name() << " " << c->help() << "\n";
@@ -177,7 +178,7 @@ std::string MetricsRegistry::to_prometheus() const {
 
 std::string MetricsRegistry::to_json() const {
     std::ostringstream oss;
-    std::shared_lock lock(mutex_);
+    auto lock = blockingWait(mutex_.co_scoped_shared_lock());
 
     oss << "{\"metrics\":{";
     bool first = true;

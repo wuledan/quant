@@ -2,6 +2,8 @@
 #include "cpp/quant/network/ws_session.h"
 
 #include <algorithm>
+
+#include "cpp/quant/infra/coroutine.h"
 #include <chrono>
 #include <sstream>
 
@@ -13,7 +15,7 @@ std::string SessionManager::generate_session_id() {
 }
 
 std::string SessionManager::create_session(const std::string& remote_addr, int remote_port) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     std::string id = generate_session_id();
     auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -29,7 +31,7 @@ std::string SessionManager::create_session(const std::string& remote_addr, int r
 }
 
 bool SessionManager::close_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) return false;
     for (const auto& topic : it->second.subscriptions) {
@@ -45,13 +47,13 @@ bool SessionManager::close_session(const std::string& session_id) {
 }
 
 SessionInfo* SessionManager::find_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = sessions_.find(session_id);
     return it != sessions_.end() ? &it->second : nullptr;
 }
 
 bool SessionManager::authenticate(const std::string& session_id, const std::string& token) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) return false;
     if (!callbacks_.on_auth) {
@@ -69,7 +71,7 @@ bool SessionManager::authenticate(const std::string& session_id, const std::stri
 }
 
 bool SessionManager::subscribe(const std::string& session_id, const std::string& topic) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) return false;
     it->second.subscriptions.insert(topic);
@@ -79,7 +81,7 @@ bool SessionManager::subscribe(const std::string& session_id, const std::string&
 }
 
 bool SessionManager::unsubscribe(const std::string& session_id, const std::string& topic) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) return false;
     it->second.subscriptions.erase(topic);
@@ -93,13 +95,13 @@ bool SessionManager::unsubscribe(const std::string& session_id, const std::strin
 }
 
 std::vector<std::string> SessionManager::session_ids_for_topic(const std::string& topic) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     auto it = topic_subscribers_.find(topic);
     return it != topic_subscribers_.end() ? it->second : std::vector<std::string>();
 }
 
 std::vector<std::string> SessionManager::active_session_ids() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     std::vector<std::string> result;
     result.reserve(sessions_.size());
     for (const auto& [id, info] : sessions_) {
@@ -109,7 +111,7 @@ std::vector<std::string> SessionManager::active_session_ids() const {
 }
 
 void SessionManager::cleanup_expired(int64_t now_ns, int64_t timeout_ns) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto lock = infra::blockingWait(mutex_.co_scoped_lock());
     for (auto it = sessions_.begin(); it != sessions_.end(); ) {
         if (now_ns - it->second.last_activity_ns > timeout_ns) {
             if (callbacks_.on_close) callbacks_.on_close(it->first);
