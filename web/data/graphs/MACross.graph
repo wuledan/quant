@@ -1,0 +1,120 @@
+{
+  "strategy_name": "MACross",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "sma_1",
+      "op_type": "SMA",
+      "inputs": {
+        "price": {
+          "name": "price",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "close"
+        }
+      },
+      "outputs": {
+        "value": {
+          "name": "value",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.sma_1.value"
+        }
+      },
+      "params": {
+        "period": 5.0
+      }
+    },
+    {
+      "id": "sma_2",
+      "op_type": "SMA",
+      "inputs": {
+        "price": {
+          "name": "price",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "close"
+        }
+      },
+      "outputs": {
+        "value": {
+          "name": "value",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.sma_2.value"
+        }
+      },
+      "params": {
+        "period": 20.0
+      }
+    },
+    {
+      "id": "cross_3",
+      "op_type": "CROSS_ABOVE",
+      "inputs": {
+        "fast": {
+          "name": "fast",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.sma_1.value"
+        },
+        "slow": {
+          "name": "slow",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.sma_2.value"
+        }
+      },
+      "outputs": {
+        "signal": {
+          "name": "signal",
+          "type": {
+            "base_type": "Signal",
+            "inner_type": "bool"
+          },
+          "source": "node.cross_3.signal"
+        }
+      },
+      "params": {}
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "sma_1",
+      "from_port": "value",
+      "to_node": "cross_3",
+      "to_port": "fast"
+    },
+    {
+      "from_node": "sma_2",
+      "from_port": "value",
+      "to_node": "cross_3",
+      "to_port": "slow"
+    }
+  ],
+  "data_bindings": [
+    {
+      "data_source": "close",
+      "to_node": "sma_1",
+      "to_port": "price"
+    },
+    {
+      "data_source": "close",
+      "to_node": "sma_2",
+      "to_port": "price"
+    }
+  ],
+  "signal_handlers": []
+}

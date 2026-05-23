@@ -1,0 +1,120 @@
+{
+  "strategy_name": "TrendFollow",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "ema_4",
+      "op_type": "EMA",
+      "inputs": {
+        "price": {
+          "name": "price",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "close"
+        }
+      },
+      "outputs": {
+        "value": {
+          "name": "value",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.ema_4.value"
+        }
+      },
+      "params": {
+        "period": 10.0
+      }
+    },
+    {
+      "id": "ema_5",
+      "op_type": "EMA",
+      "inputs": {
+        "price": {
+          "name": "price",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "close"
+        }
+      },
+      "outputs": {
+        "value": {
+          "name": "value",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.ema_5.value"
+        }
+      },
+      "params": {
+        "period": 30.0
+      }
+    },
+    {
+      "id": "cross_6",
+      "op_type": "CROSS_ABOVE",
+      "inputs": {
+        "fast": {
+          "name": "fast",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.ema_4.value"
+        },
+        "slow": {
+          "name": "slow",
+          "type": {
+            "base_type": "TimeSeries",
+            "inner_type": "float"
+          },
+          "source": "node.ema_5.value"
+        }
+      },
+      "outputs": {
+        "signal": {
+          "name": "signal",
+          "type": {
+            "base_type": "Signal",
+            "inner_type": "bool"
+          },
+          "source": "node.cross_6.signal"
+        }
+      },
+      "params": {}
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "ema_4",
+      "from_port": "value",
+      "to_node": "cross_6",
+      "to_port": "fast"
+    },
+    {
+      "from_node": "ema_5",
+      "from_port": "value",
+      "to_node": "cross_6",
+      "to_port": "slow"
+    }
+  ],
+  "data_bindings": [
+    {
+      "data_source": "close",
+      "to_node": "ema_4",
+      "to_port": "price"
+    },
+    {
+      "data_source": "close",
+      "to_node": "ema_5",
+      "to_port": "price"
+    }
+  ],
+  "signal_handlers": []
+}
