@@ -1,109 +1,92 @@
-# market_data_bridge.py — AKShare → TCP length-prefixed JSON bridge
+# market_data_bridge.py — AKShare→TCP length-prefixed JSON bridge
 #
 # Protocol (matching C++ DataIngestor):
 #   [4 bytes: uint32_t payload length (network byte order)]
 #   [N bytes: JSON payload]
 #
-# JSON format (matching DataIngestor::parse_kline):
-#   {"symbol":"000001.SZ","ts":1769030400000000,"open":11.12,"high":11.20,
-#    "low":11.08,"close":11.16,"volume":12345678,"amount":137000000}
+# Uses curl subprocess for HTTP (trusted proxy compatibility).
 #
 # Usage:
-#   python3 py/bridge/market_data_bridge.py --port 9000 --symbols 000001.SZ,600519.SH
-#   # DataIngestor connects to localhost:9000
+#   HTTPS_PROXY=http://127.0.0.1:7890 python3 py/bridge/market_data_bridge.py
+#   DataIngestor connects to localhost:9000
 
 import argparse
 import asyncio
 import json
 import logging
-import socket
+import os
 import struct
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Add py/ to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import akshare as ak
 
 logging.basicConfig(level=logging.INFO, format="[Bridge] %(message)s")
 log = logging.getLogger(__name__)
 
+PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
 
-# ── AKShare data fetcher ──
 
-def fetch_recent_kline(symbol_raw: str, freq: str = "daily", days: int = 5):
-    """Pull recent kline data from AKShare.
+# ── Curl-based data fetcher ──
 
-    Args:
-        symbol_raw: "000001" or "000001.SZ" (market suffix stripped)
-        freq: "daily", "weekly", "monthly", "1m", "5m", "15m", "30m", "60m"
-        days: lookback window
+def fetch_eastmoney_kline(symbol_raw: str, days: int = 5):
+    """Pull recent daily kline from eastmoney API via curl.
 
-    Returns:
-        list of dict: [{symbol, ts, open, high, low, close, volume, amount}, ...]
+    Eastmoney API: push2his.eastmoney.com
+    secid: 0.{code} for SZ, 1.{code} for SH
     """
-    symbol = symbol_raw.replace(".SZ", "").replace(".SH", "")
+    code = symbol_raw.replace(".SZ", "").replace(".SH", "")
+    market = "0" if symbol_raw.endswith("SZ") else "1"
+    secid = f"{market}.{code}"
 
     today = datetime.now()
-    start = (today - timedelta(days=days + 5)).strftime("%Y%m%d")
+    beg = (today - timedelta(days=days + 3)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
 
+    url = (
+        f"https://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"fields1=f1,f2,f3,f4,f5,f6"
+        f"&fields2=f51,f52,f53,f54,f55,f56,f57"
+        f"&ut=7eea3edcaed734bea9cbfc24409ed989"
+        f"&klt=101&fqt=1&secid={secid}&beg={beg}&end={end}"
+    )
+
+    cmd = ["curl", "-s", "--max-time", "15"]
+    if PROXY:
+        cmd += ["-x", PROXY]
+    cmd.append(url)
+
     try:
-        if freq in ("daily", "weekly", "monthly"):
-            df = ak.stock_zh_a_hist(
-                symbol=symbol, period=freq, start_date=start, end_date=end, adjust="qfq"
-            )
-            if df is None or df.empty:
-                return []
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if result.returncode != 0:
+            log.debug(f"curl failed for {symbol_raw}: {result.stderr[:100]}")
+            return []
+        data = json.loads(result.stdout)
+        klines = data.get("data", {}).get("klines", [])
+        if not klines:
+            return []
 
-            results = []
-            for _, row in df.iterrows():
-                date_str = row["日期"].replace("-", "")
-                ts = int(
-                    datetime.strptime(date_str, "%Y%m%d").timestamp() * 1_000_000
-                )
-                results.append(
-                    {
-                        "symbol": symbol_raw,
-                        "ts": ts,
-                        "open": float(row["开盘"]),
-                        "high": float(row["最高"]),
-                        "low": float(row["最低"]),
-                        "close": float(row["收盘"]),
-                        "volume": int(row["成交量"]),
-                        "amount": int(float(row["成交额"])),
-                    }
-                )
-            return results
-        else:
-            # Minute-level: AKShare intraday API
-            period_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "60m": "60"}
-            period = period_map.get(freq, "5")
-            df = ak.stock_zh_a_hist_min_em(
-                symbol=symbol, period=period, start_date=start, end_date=end, adjust="qfq"
-            )
-            if df is None or df.empty:
-                return []
-
-            results = []
-            for _, row in df.iterrows():
-                ts = int(row["时间"].timestamp() * 1_000_000)
-                results.append(
-                    {
-                        "symbol": symbol_raw,
-                        "ts": ts,
-                        "open": float(row["开盘"]),
-                        "high": float(row["最高"]),
-                        "low": float(row["最低"]),
-                        "close": float(row["收盘"]),
-                        "volume": int(row["成交量"]),
-                        "amount": int(float(row["成交额"])),
-                    }
-                )
-            return results
+        results = []
+        for line in klines:
+            parts = line.split(",")
+            if len(parts) < 7:
+                continue
+            # parts: date,open,high,low,close,volume,amount
+            ts = int(datetime.strptime(parts[0], "%Y-%m-%d").timestamp() * 1_000_000)
+            results.append({
+                "symbol": symbol_raw,
+                "ts": ts,
+                "open": float(parts[1]),
+                "high": float(parts[2]),
+                "low": float(parts[3]),
+                "close": float(parts[4]),
+                "volume": int(float(parts[5])),
+                "amount": int(float(parts[6])),
+            })
+        return results
     except Exception as e:
         log.warning(f"fetch failed for {symbol_raw}: {e}")
         return []
@@ -112,40 +95,37 @@ def fetch_recent_kline(symbol_raw: str, freq: str = "daily", days: int = 5):
 # ── TCP Bridge Server ──
 
 async def handle_client(reader, writer, state):
-    """Accept connection, push data, keep-alive."""
     addr = writer.get_extra_info("peername")
     log.info(f"DataIngestor connected from {addr}")
 
     try:
-        # Send initial batch of recent data
         for sym in state["symbols"]:
-            rows = fetch_recent_kline(sym, state["freq"], days=state["lookback_days"])
+            rows = fetch_eastmoney_kline(sym, days=state["lookback_days"])
             for row in rows:
                 payload = json.dumps(row).encode()
                 header = struct.pack("!I", len(payload))
                 writer.write(header + payload)
 
         await writer.drain()
-        log.info(
-            f"Sent initial batch for {len(state['symbols'])} symbols to {addr}"
-        )
+        total = sum(1 for sym in state["symbols"]
+                    for _ in fetch_eastmoney_kline(sym, days=1))
+        log.info(f"Sent batch for {len(state['symbols'])} symbols to {addr}")
 
-        # Keep connection alive and push periodic updates
+        # Keep connection alive, push periodic updates
         while True:
             try:
-                data = await asyncio.wait_for(reader.read(1024), timeout=state["poll_interval"])
+                data = await asyncio.wait_for(reader.read(1024),
+                                               timeout=state["poll_interval"])
                 if not data:
                     break
             except asyncio.TimeoutError:
-                # Periodic poll
                 for sym in state["symbols"]:
-                    rows = fetch_recent_kline(sym, state["freq"], days=1)
+                    rows = fetch_eastmoney_kline(sym, days=1)
                     for row in rows:
                         payload = json.dumps(row).encode()
                         header = struct.pack("!I", len(payload))
                         writer.write(header + payload)
                 await writer.drain()
-                log.debug(f"Pushed update for {len(state['symbols'])} symbols")
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
@@ -155,55 +135,38 @@ async def handle_client(reader, writer, state):
 
 
 async def run_bridge(host, port, symbols, freq, lookback_days, poll_sec):
-    """Start TCP bridge server."""
     state = {
         "symbols": symbols,
         "freq": freq,
         "lookback_days": lookback_days,
         "poll_interval": poll_sec,
     }
-
     server = await asyncio.start_server(
         lambda r, w: handle_client(r, w, state), host, port
     )
-
-    addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
-    log.info(f"Bridge listening on {addrs}")
+    log.info(f"Bridge listening on {host}:{port}")
     log.info(f"Symbols: {symbols}, freq={freq}, poll={poll_sec}s")
-
+    log.info(f"Proxy: {PROXY or 'DIRECT'}")
     async with server:
         await server.serve_forever()
 
 
-# ── CLI ──
-
 def main():
-    parser = argparse.ArgumentParser(description="AKShare Market Data Bridge")
+    parser = argparse.ArgumentParser(description="Market Data Bridge (curl-based)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument(
-        "--symbols",
-        default="000001.SZ,600519.SH,000002.SZ,300750.SZ",
-        help="Comma-separated symbols",
-    )
-    parser.add_argument(
-        "--freq", default="daily", help="daily|1m|5m|15m|30m|60m"
-    )
-    parser.add_argument("--lookback", type=int, default=5, help="Initial lookback days")
-    parser.add_argument("--poll", type=int, default=60, help="Poll interval (seconds)")
+    parser.add_argument("--symbols", default="000001.SZ,600519.SH,300750.SZ")
+    parser.add_argument("--freq", default="daily")
+    parser.add_argument("--lookback", type=int, default=5)
+    parser.add_argument("--poll", type=int, default=60)
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",")]
-
-    log.info("Starting AKShare Market Data Bridge")
-    log.info(f"Source: AKShare (free, no token required)")
+    log.info("Starting Market Data Bridge (curl-based, eastmoney API)")
 
     try:
-        asyncio.run(
-            run_bridge(
-                args.host, args.port, symbols, args.freq, args.lookback, args.poll
-            )
-        )
+        asyncio.run(run_bridge(args.host, args.port, symbols, args.freq,
+                                args.lookback, args.poll))
     except KeyboardInterrupt:
         log.info("Bridge stopped")
 
