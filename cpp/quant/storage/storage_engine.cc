@@ -54,6 +54,10 @@ void StorageEngine::store_kline(const std::string& symbol, uint8_t data_type,
 void StorageEngine::store_kline_batch(const std::string& symbol, uint8_t data_type,
                                       const std::vector<KlineRow>& rows) {
     cache_->append_batch(symbol, data_type, rows);
+    // Also accumulate in store for periodic or explicit disk flush
+    if (!stores_.empty()) {
+        stores_.begin()->second->store_kline_batch(symbol, data_type, rows);
+    }
 }
 
 std::vector<KlineRow> StorageEngine::query_kline(const std::string& symbol,
@@ -105,11 +109,23 @@ DiskPersistence& StorageEngine::disk() noexcept {
     if (stores_.empty()) {
         auto store = std::make_unique<TimeSeriesStore>(TimeSeriesStore::Options{
             .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 1},
-            .data_dir = opts_.data_dir / "segments",
+            .data_dir = opts_.data_dir,
         });
         stores_["__default__"] = std::move(store);
     }
     return stores_.begin()->second->disk();
+}
+
+void StorageEngine::set_remote_storage(RemoteStorage* rs) noexcept {
+    for (auto& [key, store] : stores_) {
+        store->set_remote_storage(rs);
+    }
+}
+
+void StorageEngine::flush_all() {
+    for (auto& [key, store] : stores_) {
+        infra::blockingWait(store->co_flush());
+    }
 }
 
 void StorageEngine::set_write_buffer(std::unique_ptr<WriteBuffer> wb) {

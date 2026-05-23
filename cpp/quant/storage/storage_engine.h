@@ -17,6 +17,7 @@ namespace quant::storage {
 using infra::CoTask;
 
 class WriteBuffer;
+class RemoteStorage;
 
 class StorageEngine {
 public:
@@ -57,6 +58,12 @@ public:
     void set_write_buffer(std::unique_ptr<WriteBuffer> wb);
     WriteBuffer* write_buffer() noexcept;
     void close();
+
+    // ── Bulk flush ──
+    void flush_all();
+
+    // ── Remote storage read-through ──
+    void set_remote_storage(RemoteStorage* rs) noexcept;
 
     // ── Dirty flush (periodic persistence) ──
     void start_dirty_flush(folly::Executor* executor);

@@ -106,9 +106,8 @@ protected:
             rows.push_back(row);
         }
 
-        auto status = storage_->store_kline_batch(
-            kSymbol, ev::DataType::kKlineDay, rows);
-        ASSERT_EQ(status, sto::StoreStatus::kOk);
+        storage_->store_kline_batch(
+            kSymbol, static_cast<uint8_t>(ev::DataType::kKlineDay), rows);
     }
 
     // Create an SMA crossover IR graph:
@@ -213,9 +212,8 @@ protected:
             rows.push_back(row);
         }
 
-        auto status = storage_->store_kline_batch(
-            symbol, ev::DataType::kKlineDay, rows);
-        ASSERT_EQ(status, sto::StoreStatus::kOk);
+        storage_->store_kline_batch(
+            symbol, static_cast<uint8_t>(ev::DataType::kKlineDay), rows);
     }
 
     // Helper: build default backtest params for a given symbol

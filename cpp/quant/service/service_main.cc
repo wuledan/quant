@@ -105,6 +105,9 @@ int main(int argc, char* argv[]) {
     if (loaded > 0) {
         std::cout << "[Service] Loaded " << init_stats.rows_loaded << " rows from "
                   << init_stats.files_loaded << " files (" << init_stats.rows_failed << " failed)\n";
+        // Flush all loaded data to disk segments
+        storage.flush_all();
+        std::cout << "[Service] Flushed all loaded data to disk segments\n";
     } else {
         std::cout << "[Service] No historical data found in ./data/csv_daily\n";
     }
@@ -170,6 +173,8 @@ int main(int argc, char* argv[]) {
     remote_opts.secret_key = "minioadmin";
     remote_opts.bucket_kline = "quant-kline";
     auto remote_storage = std::make_unique<storage::RemoteStorage>(remote_opts);
+    // Wire remote storage into TimeSeriesStore for read-through on cache+disk miss
+    storage.set_remote_storage(remote_storage.get());
 
     storage::ColdUploadDaemon cold_daemon(
         storage.disk(), *remote_storage,

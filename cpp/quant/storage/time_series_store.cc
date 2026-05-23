@@ -170,6 +170,19 @@ StoreStatus TimeSeriesStore::store_kline_batch(const std::string& symbol,
                                                 const std::vector<KlineRow>& rows) {
     if (rows.empty()) return StoreStatus::kInvalidArgument;
     cache_->append_batch(symbol, data_type, rows);
+
+    // Accumulate for disk flush (same as coroutine path)
+    std::string key = pending_key(symbol, data_type);
+    auto& batch = pending_disk_[key];
+    if (batch.rows.empty()) {
+        batch.min_ts = rows.front().timestamp;
+        batch.max_ts = rows.back().timestamp;
+    } else {
+        batch.min_ts = std::min(batch.min_ts, rows.front().timestamp);
+        batch.max_ts = std::max(batch.max_ts, rows.back().timestamp);
+    }
+    batch.rows.insert(batch.rows.end(), rows.begin(), rows.end());
+
     return StoreStatus::kOk;
 }
 
