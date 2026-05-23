@@ -10,6 +10,7 @@
 #include "cpp/quant/storage/segment_index.h"
 #include "cpp/quant/storage/write_buffer.h"
 #include "cpp/quant/storage/write_ahead_log.h"
+#include "cpp/quant/storage/cold_upload_daemon.h"
 #include "cpp/quant/storage/data_initializer.h"
 #include "cpp/quant/infra/coroutine.h"
 
@@ -1247,4 +1248,278 @@ TEST(DiskPersistenceTest, CoWriteAndReadFallback) {
         EXPECT_EQ(ts_out[4], 104);
     }
     std::filesystem::remove_all("/tmp/quant_test_co_fallback");
+}
+
+// ── T5.1: RemoteStorage tests ──
+
+#include "cpp/quant/storage/remote_storage.h"
+
+static bool remote_storage_available() {
+    // Quick connectivity check against the default MinIO endpoint
+    int rc = system(
+        "curl --silent --fail --output /dev/null --max-time 2 "
+        "http://127.0.0.1:9000/ 2>/dev/null");
+    return rc == 0;
+}
+
+TEST(RemoteStorageTest, DataTypeLabel) {
+    EXPECT_EQ(RemoteStorage::data_type_label(0), "1min");
+    EXPECT_EQ(RemoteStorage::data_type_label(1), "5min");
+    EXPECT_EQ(RemoteStorage::data_type_label(2), "15min");
+    EXPECT_EQ(RemoteStorage::data_type_label(3), "30min");
+    EXPECT_EQ(RemoteStorage::data_type_label(4), "60min");
+    EXPECT_EQ(RemoteStorage::data_type_label(5), "day");
+    EXPECT_EQ(RemoteStorage::data_type_label(99), "unknown");
+}
+
+TEST(RemoteStorageTest, ObjectKeyFormat) {
+    auto key = RemoteStorage::kline_object_key("000001", 0, 2025);
+    EXPECT_EQ(key, "kline/1min/000001/2025.parquet");
+
+    key = RemoteStorage::kline_object_key("600519.SH", 5, 2024);
+    EXPECT_EQ(key, "kline/day/600519.SH/2024.parquet");
+}
+
+TEST(RemoteStorageTest, YearFromTimestamp) {
+    // 2025-01-01 00:00:00 UTC in microseconds: 1735689600 * 1000000
+    EXPECT_EQ(RemoteStorage::year_from_timestamp(1735689600000000), 2025);
+    // 2024-06-15 12:30:00 UTC: 1718454600 * 1000000
+    EXPECT_EQ(RemoteStorage::year_from_timestamp(1718454600000000), 2024);
+    // 2026-12-31 23:59:59 UTC: (1767225600 + 365*86400 - 1) * 1000000
+    EXPECT_EQ(RemoteStorage::year_from_timestamp(1798761599000000), 2026);
+}
+
+TEST(RemoteStorageTest, ParquetRoundtrip) {
+    std::vector<KlineRow> rows;
+    rows.reserve(3);
+    for (int i = 0; i < 3; ++i) {
+        KlineRow row;
+        row.timestamp = 1735689600000000 + i * 60000000;  // 1min intervals
+        row.open_price = 10000 + i;
+        row.high_price = 10100 + i;
+        row.low_price = 9900 + i;
+        row.close_price = 10050 + i;
+        row.vwap = 10025 + i;
+        row.volume = 1000 + i * 100;
+        row.amount = 10000000 + i * 1000000;
+        rows.push_back(row);
+    }
+
+    auto data = RemoteStorage::kline_to_parquet(rows);
+    ASSERT_FALSE(data.empty());
+    EXPECT_EQ(data.size(), 48 * 3 + 64);  // header + 3 rows
+
+    auto decoded = RemoteStorage::parquet_to_kline(data);
+    ASSERT_EQ(decoded.size(), 3u);
+
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_EQ(decoded[i].timestamp, rows[i].timestamp);
+        EXPECT_EQ(decoded[i].open_price, rows[i].open_price);
+        EXPECT_EQ(decoded[i].high_price, rows[i].high_price);
+        EXPECT_EQ(decoded[i].low_price, rows[i].low_price);
+        EXPECT_EQ(decoded[i].close_price, rows[i].close_price);
+        EXPECT_EQ(decoded[i].vwap, rows[i].vwap);
+        EXPECT_EQ(decoded[i].volume, rows[i].volume);
+        EXPECT_EQ(decoded[i].amount, rows[i].amount);
+    }
+}
+
+TEST(RemoteStorageTest, ParquetRoundtripEmpty) {
+    auto data = RemoteStorage::kline_to_parquet({});
+    EXPECT_TRUE(data.empty());
+
+    auto decoded = RemoteStorage::parquet_to_kline({});
+    EXPECT_TRUE(decoded.empty());
+}
+
+TEST(RemoteStorageTest, ParquetInvalidData) {
+    std::vector<uint8_t> garbage = {0x00, 0x01, 0x02, 0x03};
+    auto decoded = RemoteStorage::parquet_to_kline(garbage);
+    EXPECT_TRUE(decoded.empty());
+}
+
+TEST(RemoteStorageTest, ParquetWrongMagic) {
+    // Build a header with wrong magic
+    KLPQHeader header;
+    header.magic = 0xDEADBEEF;
+    header.version = 1;
+    header.num_rows = 1;
+    header.row_stride = sizeof(KlineRow);
+    std::vector<uint8_t> data(sizeof(header));
+    std::memcpy(data.data(), &header, sizeof(header));
+
+    auto decoded = RemoteStorage::parquet_to_kline(data);
+    EXPECT_TRUE(decoded.empty());
+}
+
+TEST(RemoteStorageTest, S3ApiPutGetExists) {
+    if (!remote_storage_available()) {
+        GTEST_SKIP() << "MinIO not available at 127.0.0.1:9000";
+    }
+
+    RemoteStorage rs(RemoteStorage::Options{
+        .bucket_kline = "quant-kline-test",
+    });
+
+    // Create bucket if needed (bucket creation not exposed, rely on
+    // pre-existing test bucket or MinIO auto-creation with path-style)
+    std::vector<uint8_t> test_data = {0x48, 0x65, 0x6C, 0x6C, 0x6F};  // "Hello"
+
+    // PUT
+    EXPECT_TRUE(rs.put_object("quant-kline-test", "test/hello.bin", test_data));
+
+    // HEAD
+    EXPECT_TRUE(rs.head_object("quant-kline-test", "test/hello.bin"));
+
+    // GET
+    auto got = rs.get_object("quant-kline-test", "test/hello.bin");
+    ASSERT_EQ(got.size(), test_data.size());
+    EXPECT_EQ(memcmp(got.data(), test_data.data(), got.size()), 0);
+
+    // HEAD non-existent
+    EXPECT_FALSE(rs.head_object("quant-kline-test", "test/nonexistent"));
+
+    // GET non-existent
+    auto empty = rs.get_object("quant-kline-test", "test/nonexistent");
+    EXPECT_TRUE(empty.empty());
+}
+
+TEST(RemoteStorageTest, UploadDownloadKlineRoundtrip) {
+    if (!remote_storage_available()) {
+        GTEST_SKIP() << "MinIO not available at 127.0.0.1:9000";
+    }
+
+    RemoteStorage rs(RemoteStorage::Options{
+        .bucket_kline = "quant-kline-test",
+    });
+
+    std::vector<KlineRow> rows;
+    rows.reserve(5);
+    for (int i = 0; i < 5; ++i) {
+        KlineRow row;
+        row.timestamp = 1735689600000000 + i * 60000000;
+        row.open_price = 10000 + i;
+        row.high_price = 10100 + i;
+        row.low_price = 9900 + i;
+        row.close_price = 10050 + i;
+        row.vwap = 10025 + i;
+        row.volume = 1000 + i * 100;
+        row.amount = 10000000 + i * 1000000;
+        rows.push_back(row);
+    }
+
+    // Upload
+    EXPECT_TRUE(rs.upload_kline("000001", 0, 2025, rows));
+
+    // Exists
+    EXPECT_TRUE(rs.exists("000001", 0, 2025));
+
+    // Download
+    auto downloaded = rs.download_kline("000001", 0, 2025);
+    ASSERT_EQ(downloaded.size(), 5u);
+    for (int i = 0; i < 5; ++i) {
+        EXPECT_EQ(downloaded[i].timestamp, rows[i].timestamp);
+    }
+
+    // Exists non-existent
+    EXPECT_FALSE(rs.exists("nonexistent", 0, 2025));
+}
+
+// ── T5.7: ColdUploadDaemon tests ──
+
+TEST(ColdUploadDaemonTest, FindsColdSegments) {
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_1");
+    {
+        DiskPersistence disk("/tmp/quant_test_cold_daemon_1");
+
+        // Write a "hot" segment (current mtime)
+        auto rows_hot = make_rows(1000, 5);
+        auto blocks_hot = TimeSeriesStore::rows_to_column_blocks(rows_hot);
+        disk.write_segment("000001", 1, blocks_hot, 1000, 1004);
+
+        // Write a segment, then backdate its mtime to 60 days ago
+        auto rows_cold = make_rows(2000, 5);
+        auto blocks_cold = TimeSeriesStore::rows_to_column_blocks(rows_cold);
+        disk.write_segment("000002", 1, blocks_cold, 2000, 2004);
+
+        auto seg_path = disk.data_dir() / "000002_1_2000.seg";
+        auto old_time = std::filesystem::file_time_type::clock::now()
+                      - std::chrono::hours(24 * 60);
+        std::filesystem::last_write_time(seg_path, old_time);
+
+        // Create daemon with 30-day threshold (60 > 30, so "000002" is cold)
+        RemoteStorage remote(RemoteStorage::Options{});
+        ColdUploadDaemon daemon(disk, remote,
+            ColdUploadDaemon::Options{.cold_threshold_days = 30});
+
+        auto cold = daemon.find_cold_segments();
+        ASSERT_EQ(cold.size(), 1u);
+        EXPECT_EQ(cold[0].symbol, "000002");
+        EXPECT_EQ(cold[0].data_type, 1);
+        EXPECT_EQ(cold[0].min_ts, 2000);
+        EXPECT_EQ(cold[0].max_ts, 2004);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_1");
+}
+
+TEST(ColdUploadDaemonTest, NoColdSegmentsBelowThreshold) {
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_2");
+    {
+        DiskPersistence disk("/tmp/quant_test_cold_daemon_2");
+
+        auto rows = make_rows(1000, 5);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 1000, 1004);
+
+        // 365-day threshold with fresh files → should find nothing
+        RemoteStorage remote(RemoteStorage::Options{});
+        ColdUploadDaemon daemon(disk, remote,
+            ColdUploadDaemon::Options{.cold_threshold_days = 365});
+
+        auto cold = daemon.find_cold_segments();
+        EXPECT_TRUE(cold.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_2");
+}
+
+TEST(ColdUploadDaemonTest, FindsMultipleColdSegments) {
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_3");
+    {
+        DiskPersistence disk("/tmp/quant_test_cold_daemon_3");
+
+        auto rows = make_rows(1000, 5);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 1000, 1004);
+        disk.write_segment("000002", 1, blocks, 2000, 2004);
+
+        // Backdate both
+        auto old_time = std::filesystem::file_time_type::clock::now()
+                      - std::chrono::hours(24 * 90);
+        std::filesystem::last_write_time(disk.data_dir() / "000001_1_1000.seg", old_time);
+        std::filesystem::last_write_time(disk.data_dir() / "000002_1_2000.seg", old_time);
+
+        RemoteStorage remote(RemoteStorage::Options{});
+        ColdUploadDaemon daemon(disk, remote,
+            ColdUploadDaemon::Options{.cold_threshold_days = 30});
+
+        auto cold = daemon.find_cold_segments();
+        ASSERT_EQ(cold.size(), 2u);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_3");
+}
+
+TEST(ColdUploadDaemonTest, EmptyDirectoryFindsNothing) {
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_empty");
+    std::filesystem::create_directories("/tmp/quant_test_cold_daemon_empty");
+    {
+        DiskPersistence disk("/tmp/quant_test_cold_daemon_empty");
+
+        RemoteStorage remote(RemoteStorage::Options{});
+        ColdUploadDaemon daemon(disk, remote,
+            ColdUploadDaemon::Options{.cold_threshold_days = 1});
+
+        auto cold = daemon.find_cold_segments();
+        EXPECT_TRUE(cold.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_cold_daemon_empty");
 }

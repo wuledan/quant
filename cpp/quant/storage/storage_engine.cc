@@ -101,6 +101,10 @@ CoTask<std::vector<KlineRow>> StorageEngine::co_query_kline(
     co_return co_await cache_->co_query(symbol, data_type, start_ts, end_ts);
 }
 
+DiskPersistence& StorageEngine::disk() noexcept {
+    return stores_.begin()->second->disk();
+}
+
 void StorageEngine::set_write_buffer(std::unique_ptr<WriteBuffer> wb) {
     write_buffer_ = std::move(wb);
 }

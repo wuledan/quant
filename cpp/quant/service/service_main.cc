@@ -30,7 +30,9 @@
 #include "cpp/quant/network/websocket_server.h"
 #include "cpp/quant/network/ws_event_bridge.h"
 #include "cpp/quant/scheduler/scheduler_service.h"
+#include "cpp/quant/storage/cold_upload_daemon.h"
 #include "cpp/quant/storage/data_initializer.h"
+#include "cpp/quant/storage/remote_storage.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/storage/write_ahead_log.h"
 #include "cpp/quant/storage/write_buffer.h"
@@ -138,6 +140,26 @@ int main(int argc, char* argv[]) {
 
     ingest::DataIngestor ingestor(storage, bus, ingest_config);
     std::cout << "[Service] DataIngestor created\n";
+
+    // ── 6.5 Create RemoteStorage and ColdUploadDaemon ──
+    storage::RemoteStorage::Options remote_opts;
+    remote_opts.endpoint = "http://127.0.0.1:9000";
+    remote_opts.access_key = "minioadmin";
+    remote_opts.secret_key = "minioadmin";
+    remote_opts.bucket_kline = "quant-kline";
+    auto remote_storage = std::make_unique<storage::RemoteStorage>(remote_opts);
+
+    storage::ColdUploadDaemon cold_daemon(
+        storage.disk(), *remote_storage,
+        storage::ColdUploadDaemon::Options{
+            .scan_interval = std::chrono::hours(1),
+            .cold_threshold_days = 30,
+            .remove_after_upload = false,
+        });
+    folly::coro::co_withExecutor(
+        global_exec.executor(),
+        cold_daemon.run()).start().detach();
+    std::cout << "[Service] ColdUploadDaemon started (threshold=30d, scan_interval=1h)\n";
 
     // ── 7. Create BacktestRunner and StrategyApi ──
     backtest::BacktestRunner backtest_runner(storage, bus);

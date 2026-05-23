@@ -53,6 +53,7 @@ public:
 
     // ── Access ──
     TimeSeriesCache& cache() noexcept { return *cache_; }
+    DiskPersistence& disk() noexcept;
     void set_write_buffer(std::unique_ptr<WriteBuffer> wb);
     WriteBuffer* write_buffer() noexcept;
     void close();
