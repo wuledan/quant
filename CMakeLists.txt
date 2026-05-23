@@ -291,6 +291,7 @@ target_link_libraries(quant_risk PUBLIC quant_event)
 # ── ingest library ──
 add_library(quant_ingest
     cpp/quant/ingest/data_ingestor.cc
+    cpp/quant/ingest/tushare_ingestor.cc
 )
 target_include_directories(quant_ingest PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_ingest PUBLIC quant_storage quant_event quant_network)
@@ -408,6 +409,10 @@ add_test(NAME risk_test COMMAND risk_test)
 add_executable(data_ingestor_test cpp/quant/ingest/test_data_ingestor.cc)
 target_link_libraries(data_ingestor_test PRIVATE quant_ingest GTest::gtest_main)
 add_test(NAME data_ingestor_test COMMAND data_ingestor_test)
+
+add_executable(tushare_ingestor_test cpp/test/tushare_ingestor_test.cc)
+target_link_libraries(tushare_ingestor_test PRIVATE quant_ingest GTest::gtest_main)
+add_test(NAME tushare_ingestor_test COMMAND tushare_ingestor_test)
 
 add_executable(network_test cpp/test/network_test.cc)
 target_link_libraries(network_test PRIVATE quant_network GTest::gtest_main)
