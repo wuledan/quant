@@ -35,6 +35,7 @@
 #include "cpp/quant/scheduler/scheduler_service.h"
 #include "cpp/quant/storage/cold_upload_daemon.h"
 #include "cpp/quant/storage/data_initializer.h"
+#include "cpp/quant/storage/corporate_action_store.h"
 #include "cpp/quant/storage/remote_storage.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/storage/write_ahead_log.h"
@@ -110,6 +111,19 @@ int main(int argc, char* argv[]) {
         std::cout << "[Service] Flushed all loaded data to disk segments\n";
     } else {
         std::cout << "[Service] No historical data found in ./data/csv_daily\n";
+    }
+
+    // ── 2.7 Load corporate actions ──
+    {
+        storage::CorporateActionStore::Options ca_opts;
+        ca_opts.data_dir = "./data";
+        storage::CorporateActionStore ca_store(ca_opts);
+        ca_store.load();
+        auto n_actions = ca_store.num_actions();
+        auto n_symbols = ca_store.num_symbols();
+        std::cout << "[Service] CorporateActionStore loaded: "
+                  << n_actions << " actions for " << n_symbols << " symbols\n";
+        // Note: ca_store is local, will be wired into BacktestRunner in a future PR
     }
 
     // ── 3. Create EventBus and start it ──
