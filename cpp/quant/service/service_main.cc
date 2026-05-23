@@ -27,6 +27,7 @@
 #include "cpp/quant/infra/etcd_client.h"
 #include "cpp/quant/infra/strategy_watcher.h"
 #include "cpp/quant/ingest/data_ingestor.h"
+#include "cpp/quant/ingest/tushare_ingestor.h"
 #include "cpp/quant/network/global_executor.h"
 #include "cpp/quant/network/http_server.h"
 #include "cpp/quant/network/websocket_server.h"
@@ -145,6 +146,21 @@ int main(int argc, char* argv[]) {
 
     ingest::DataIngestor ingestor(storage, bus, ingest_config);
     std::cout << "[Service] DataIngestor created\n";
+
+    // ── 6.2 Create TushareIngestor (if TUSHARE_TOKEN set) ──
+    const char* tushare_token = std::getenv("TUSHARE_TOKEN");
+    if (tushare_token && tushare_token[0] != '\0') {
+        ingest::TushareIngestor::Options tushare_opts;
+        tushare_opts.token = tushare_token;
+        tushare_opts.symbols = {"000001.SZ", "000002.SZ", "600519.SH",
+                                "300750.SZ", "399001.SZ", "399006.SZ"};
+        auto tushare_ingestor = std::make_unique<ingest::TushareIngestor>(
+            tushare_opts, storage, bus);
+        std::move(tushare_ingestor->start()).scheduleOn(global_exec.executor()).start();
+        std::cout << "[Service] TushareIngestor started (poll_interval=60s)\n";
+    } else {
+        std::cout << "[Service] TushareIngestor disabled (set TUSHARE_TOKEN to enable)\n";
+    }
 
     // ── 6.5 Create RemoteStorage and ColdUploadDaemon ──
     storage::RemoteStorage::Options remote_opts;
