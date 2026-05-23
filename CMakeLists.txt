@@ -570,7 +570,7 @@ add_test(NAME strategy_center_test COMMAND strategy_center_test)
 
 # ── Strategy registry / watcher test ──
 add_executable(strategy_watcher_test cpp/test/strategy_watcher_test.cc)
-target_link_libraries(strategy_watcher_test PRIVATE quant_strategy GTest::gtest_main)
+target_link_libraries(strategy_watcher_test PRIVATE quant_infra quant_strategy GTest::gtest_main)
 add_test(NAME strategy_watcher_test COMMAND strategy_watcher_test)
 
 # ── API library ──

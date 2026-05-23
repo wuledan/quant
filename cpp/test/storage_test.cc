@@ -6,6 +6,7 @@
 #include "cpp/quant/storage/segment_index.h"
 #include "cpp/quant/storage/write_buffer.h"
 #include "cpp/quant/storage/write_ahead_log.h"
+#include "cpp/quant/storage/data_initializer.h"
 #include "cpp/quant/infra/coroutine.h"
 
 #include <gtest/gtest.h>
@@ -1001,4 +1002,147 @@ TEST(TimeSeriesCacheTest, EvictedDataNotQueryable) {
     auto other = cache.query("000002", 1, 0, 999999);
     ASSERT_EQ(other.size(), 1u);
     EXPECT_EQ(other[0].close_price, 2000000);
+}
+
+// ── T5.6: Multi-frequency DataInitializer tests ──
+
+TEST(DataInitTest, InferFreqFromFilename) {
+    EXPECT_EQ(infer_freq_from_filename("600519_1min.csv"), KlineFreq::kMin1);
+    EXPECT_EQ(infer_freq_from_filename("000001_5min_data.csv"), KlineFreq::kMin5);
+    EXPECT_EQ(infer_freq_from_filename("600519_15min_2020.csv"), KlineFreq::kMin15);
+    EXPECT_EQ(infer_freq_from_filename("000001_30min.csv"), KlineFreq::kMin30);
+    EXPECT_EQ(infer_freq_from_filename("600519_60min.csv"), KlineFreq::kMin60);
+    EXPECT_EQ(infer_freq_from_filename("000001_day.csv"), KlineFreq::kDay);
+    EXPECT_EQ(infer_freq_from_filename("600519_daily_2020.csv"), KlineFreq::kDay);
+    EXPECT_EQ(infer_freq_from_filename("000001.csv"), KlineFreq::kDay);  // default
+}
+
+TEST(DataInitTest, LoadCsvWithFreqParam) {
+    std::string csv =
+        "symbol,date,open,high,low,close,volume,amount\n"
+        "600519.SH,2020-01-02,1130.00,1145.50,1128.00,1140.00,3500000,3980000000\n"
+        "600519.SH,2020-01-03,1142.00,1150.00,1135.00,1148.00,2800000,3210000000\n";
+
+    std::filesystem::remove_all("/tmp/quant_test_init_freq");
+    std::filesystem::create_directories("/tmp/quant_test_init_freq");
+    auto csv_path = "/tmp/quant_test_init_freq/data.csv";
+    {
+        std::ofstream f(csv_path);
+        f << csv;
+    }
+
+    StorageEngine engine(StorageEngine::Options{
+        .cache_budget_mb = 64,
+        .data_dir = "/tmp/quant_test_init_freq_data",
+    });
+    engine.start();
+    DataInitializer init(engine);
+
+    // Load with 5min frequency
+    ASSERT_TRUE(init.load_csv(csv_path, KlineFreq::kMin5));
+
+    auto stats = init.stats();
+    EXPECT_EQ(stats.rows_loaded, 2);
+
+    // Data should be stored with kMin5 data_type
+    auto result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kMin5),
+                                     0, INT64_MAX);
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0].close_price, 11400000);  // 1140.00 * 10000
+
+    // Query with day data_type should return empty
+    auto day_result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kDay),
+                                          0, INT64_MAX);
+    EXPECT_TRUE(day_result.empty());
+
+    engine.shutdown();
+    std::filesystem::remove_all("/tmp/quant_test_init_freq");
+}
+
+TEST(DataInitTest, LoadCsvDirInfersFreqFromFilename) {
+    std::filesystem::remove_all("/tmp/quant_test_init_dirfreq");
+    std::filesystem::create_directories("/tmp/quant_test_init_dirfreq");
+
+    std::string day_csv =
+        "symbol,date,open,high,low,close,volume,amount\n"
+        "600519.SH,2020-01-02,1130.00,1145.50,1128.00,1140.00,3500000,3980000000\n";
+
+    std::string min1_csv =
+        "symbol,date,open,high,low,close,volume,amount\n"
+        "600519.SH,2020-01-02 09:31,1130.00,1131.00,1129.50,1130.50,10000,11300000\n";
+
+    {
+        std::ofstream f1("/tmp/quant_test_init_dirfreq/600519_day.csv");
+        f1 << day_csv;
+        std::ofstream f2("/tmp/quant_test_init_dirfreq/600519_1min.csv");
+        f2 << min1_csv;
+    }
+
+    StorageEngine engine(StorageEngine::Options{
+        .cache_budget_mb = 64,
+        .data_dir = "/tmp/quant_test_init_dirfreq",
+    });
+    engine.start();
+    DataInitializer init(engine);
+
+    int loaded = init.load_csv_dir("/tmp/quant_test_init_dirfreq");
+    EXPECT_EQ(loaded, 2);
+
+    auto stats = init.stats();
+    EXPECT_EQ(stats.rows_loaded, 2);
+    EXPECT_EQ(stats.rows_failed, 0);
+
+    // Day data should be queriable with day data_type
+    auto day_result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kDay),
+                                          0, INT64_MAX);
+    ASSERT_EQ(day_result.size(), 1u);
+
+    // 1min data should be queryable with 1min data_type
+    auto min1_result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kMin1),
+                                           0, INT64_MAX);
+    ASSERT_EQ(min1_result.size(), 1u);
+
+    engine.shutdown();
+    std::filesystem::remove_all("/tmp/quant_test_init_dirfreq");
+}
+
+TEST(DataInitTest, LoadCsvWithFreqColumn) {
+    std::string csv =
+        "symbol,date,open,high,low,close,volume,amount,freq\n"
+        "600519.SH,2020-01-02,1130.00,1145.50,1128.00,1140.00,3500000,3980000000,1min\n"
+        "600519.SH,2020-01-03,1142.00,1150.00,1135.00,1148.00,2800000,3210000000,1min\n";
+
+    std::filesystem::remove_all("/tmp/quant_test_init_freqcol");
+    std::filesystem::create_directories("/tmp/quant_test_init_freqcol");
+    auto csv_path = "/tmp/quant_test_init_freqcol/data.csv";
+    {
+        std::ofstream f(csv_path);
+        f << csv;
+    }
+
+    StorageEngine engine(StorageEngine::Options{
+        .cache_budget_mb = 64,
+        .data_dir = "/tmp/quant_test_init_freqcol",
+    });
+    engine.start();
+    DataInitializer init(engine);
+
+    // Pass kDay as default, but CSV freq column should override to kMin1
+    ASSERT_TRUE(init.load_csv(csv_path, KlineFreq::kDay));
+
+    auto stats = init.stats();
+    EXPECT_EQ(stats.rows_loaded, 2);
+
+    // Data should be stored with 1min data_type (from freq column)
+    auto result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kMin1),
+                                     0, INT64_MAX);
+    ASSERT_EQ(result.size(), 2u);
+
+    // Day data_type should return empty (overridden by column)
+    auto day_result = engine.query_kline("600519.SH", kline_freq_to_data_type(KlineFreq::kDay),
+                                          0, INT64_MAX);
+    EXPECT_TRUE(day_result.empty());
+
+    engine.shutdown();
+    std::filesystem::remove_all("/tmp/quant_test_init_freqcol");
 }

@@ -68,3 +68,59 @@ TEST_F(StrategyRegistryTest, FindByIdZero) {
     auto* entry = registry_.find_by_id(0);
     EXPECT_EQ(entry, nullptr);
 }
+
+// ── StrategyWatcher key parsing tests ──
+
+#include "cpp/quant/infra/strategy_watcher.h"
+
+namespace sw_test = quant::infra;
+
+TEST(StrategyWatcherParseTest, ParseStrategyIdNormal) {
+    auto id = sw_test::StrategyWatcher::parse_strategy_id("/quant/strategy/42/ir");
+    EXPECT_EQ(id, "42");
+}
+
+TEST(StrategyWatcherParseTest, ParseStrategyIdNoSuffix) {
+    auto id = sw_test::StrategyWatcher::parse_strategy_id("/quant/strategy/42");
+    EXPECT_EQ(id, "42");
+}
+
+TEST(StrategyWatcherParseTest, ParseStrategyIdEmpty) {
+    auto id = sw_test::StrategyWatcher::parse_strategy_id("/quant/strategy/");
+    EXPECT_EQ(id, "");
+}
+
+TEST(StrategyWatcherParseTest, ParseStrategyIdPrefixOnly) {
+    auto id = sw_test::StrategyWatcher::parse_strategy_id("/quant/strategy");
+    EXPECT_EQ(id, "");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixNormal) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy/42/ir");
+    EXPECT_EQ(suffix, "ir");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixMeta) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy/99/meta");
+    EXPECT_EQ(suffix, "meta");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixNoSuffix) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy/42");
+    EXPECT_EQ(suffix, "");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixEmpty) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy/");
+    EXPECT_EQ(suffix, "");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixPrefixOnly) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy");
+    EXPECT_EQ(suffix, "");
+}
+
+TEST(StrategyWatcherParseTest, ParseKeySuffixMultiSegment) {
+    auto suffix = sw_test::StrategyWatcher::parse_key_suffix("/quant/strategy/7/sub/dir");
+    EXPECT_EQ(suffix, "sub/dir");
+}

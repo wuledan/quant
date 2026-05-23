@@ -31,6 +31,7 @@ protected:
             client_->remove("/test/prefix/b");
             client_->remove("/test/prefix/c");
             client_->remove("/test/watch/testkey");
+            client_->remove("/test/watch/delkey");
         }
     }
 
@@ -85,16 +86,11 @@ TEST_F(EtcdClientTest, GetPrefix) {
 }
 
 TEST_F(EtcdClientTest, WatchPrefix) {
-    // Start a watch in a coroutine context
     std::atomic<int> event_count{0};
     std::string received_key;
     std::string received_value;
     std::atomic<bool> delete_received{false};
     std::atomic<bool> watch_done{false};
-
-    // Put a key BEFORE starting the watch — this tests the "initial
-    // state" case. The watch will only see changes AFTER it starts.
-    // Then put another key AFTER the watch starts to test live events.
 
     // Start the watch in a thread with blockingWait
     std::thread watch_thread([&]() {
@@ -105,7 +101,6 @@ TEST_F(EtcdClientTest, WatchPrefix) {
                 received_value = value;
                 delete_received = is_delete;
                 event_count.fetch_add(1);
-                // Auto-cancel after first event to prevent hanging
                 if (event_count.load() >= 1) {
                     client_->cancel_watches();
                     watch_done.store(true);
@@ -113,11 +108,12 @@ TEST_F(EtcdClientTest, WatchPrefix) {
             }));
     });
 
-    // Give the watch time to start (etcdctl watch subprocess needs time)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-
-    // Put a key that should trigger the watch
-    client_->put("/test/watch/testkey", "watch_value");
+    // Spin-loop: put keys until watch confirms it's running (replaces
+    // fixed sleep_for which was fragile under load).
+    for (int i = 0; i < 30 && !watch_done.load(); ++i) {
+        client_->put("/test/watch/testkey", "watch_value");
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
 
     // Wait for the event to be delivered (with timeout)
     for (int i = 0; i < 50; ++i) {
@@ -130,7 +126,6 @@ TEST_F(EtcdClientTest, WatchPrefix) {
         client_->cancel_watches();
     }
 
-    // Detach the watch thread (it will exit after cancel)
     watch_thread.detach();
 
     EXPECT_GE(event_count.load(), 1);
@@ -142,6 +137,53 @@ TEST_F(EtcdClientTest, WatchPrefix) {
 
     // Clean up
     client_->remove("/test/watch/testkey");
+}
+
+TEST_F(EtcdClientTest, WatchPrefixDeleteEvent) {
+    std::atomic<int> event_count{0};
+    std::string received_key;
+    std::atomic<bool> delete_received{false};
+    std::atomic<bool> watch_done{false};
+
+    // Pre-create the key so it can be deleted while watch is running
+    client_->put("/test/watch/delkey", "delete_me");
+
+    std::thread watch_thread([&]() {
+        blockingWait(client_->co_watch_prefix(
+            "/test/watch/",
+            [&](std::string key, std::string value, bool is_delete) {
+                received_key = key;
+                if (is_delete) {
+                    delete_received = true;
+                    event_count.fetch_add(1);
+                    client_->cancel_watches();
+                    watch_done.store(true);
+                }
+            }));
+    });
+
+    // Put + delete in a loop until the watch confirms it sees a delete
+    for (int i = 0; i < 30 && !watch_done.load(); ++i) {
+        client_->put("/test/watch/delkey", "delete_me");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        client_->remove("/test/watch/delkey");
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    // Wait for delivery
+    for (int i = 0; i < 50; ++i) {
+        if (watch_done.load()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (!watch_done.load()) {
+        client_->cancel_watches();
+    }
+
+    watch_thread.detach();
+
+    EXPECT_TRUE(delete_received.load());
+    EXPECT_EQ(received_key, "/test/watch/delkey");
 }
 
 }  // namespace

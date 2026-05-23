@@ -30,12 +30,13 @@ public:
     // Stop watching
     void stop();
 
+    // ── Key parsing (public for testing) ──
+    static std::string parse_strategy_id(const std::string& key);
+    static std::string parse_key_suffix(const std::string& key);
+
 private:
     static constexpr std::string_view kStrategyPrefix = "/quant/strategy/";
     static constexpr std::string_view kBacktestPrefix = "/quant/backtest/task/";
-
-    static std::string parse_strategy_id(const std::string& key);
-    static std::string parse_key_suffix(const std::string& key);
 
     void handle_strategy_event(const std::string& key,
                                 const std::string& value,

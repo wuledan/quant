@@ -12,6 +12,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -22,6 +24,62 @@
 #include "cpp/quant/storage/storage_engine.h"
 
 namespace quant::storage {
+
+// ────────────────────────────────────────────────────────────────
+// Infer frequency from filename
+// ────────────────────────────────────────────────────────────────
+
+KlineFreq infer_freq_from_filename(const std::string& filename) {
+    std::string lower;
+    lower.reserve(filename.size());
+    for (char c : filename) {
+        lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    // Check longer patterns first to avoid substring ambiguity
+    if (lower.find("15min") != std::string::npos) return KlineFreq::kMin15;
+    if (lower.find("30min") != std::string::npos) return KlineFreq::kMin30;
+    if (lower.find("60min") != std::string::npos) return KlineFreq::kMin60;
+    if (lower.find("5min")  != std::string::npos) return KlineFreq::kMin5;
+    if (lower.find("1min")  != std::string::npos) return KlineFreq::kMin1;
+    if (lower.find("day")   != std::string::npos) return KlineFreq::kDay;
+    return KlineFreq::kDay;  // default
+}
+
+// ────────────────────────────────────────────────────────────────
+// Parse frequency string from CSV column value
+// ────────────────────────────────────────────────────────────────
+
+static KlineFreq parse_freq_string(const std::string& s) {
+    std::string lo;
+    for (char c : s) lo += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lo == "1min" || lo == "m1" || lo == "min1") return KlineFreq::kMin1;
+    if (lo == "5min" || lo == "m5" || lo == "min5") return KlineFreq::kMin5;
+    if (lo == "15min" || lo == "m15" || lo == "min15") return KlineFreq::kMin15;
+    if (lo == "30min" || lo == "m30" || lo == "min30") return KlineFreq::kMin30;
+    if (lo == "60min" || lo == "m60" || lo == "min60") return KlineFreq::kMin60;
+    if (lo == "day" || lo == "d" || lo == "daily") return KlineFreq::kDay;
+    return KlineFreq::kDay;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Detect frequency column index from CSV header
+// ────────────────────────────────────────────────────────────────
+
+static int detect_freq_column(const std::string& header) {
+    std::vector<std::string> cols;
+    std::istringstream hss(header);
+    std::string c;
+    while (std::getline(hss, c, ',')) cols.push_back(std::move(c));
+    for (size_t i = 0; i < cols.size(); ++i) {
+        std::string lo;
+        for (char ch : cols[i]) {
+            lo += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (lo == "freq" || lo == "frequency") return static_cast<int>(i);
+    }
+    return -1;
+}
 
 DataInitializer::DataInitializer(StorageEngine& engine)
     : engine_(engine) {}
@@ -118,26 +176,45 @@ bool DataInitializer::load_csv(const std::string& csv_path,
     std::string header;
     if (!std::getline(file, header)) return false;  // skip header
 
+    // Detect optional frequency column from CSV header
+    int freq_col = detect_freq_column(header);
+
     // Group rows by symbol for batch writes
     std::unordered_map<std::string, std::vector<event::KlineRow>> symbol_rows;
 
     std::string line;
+    bool freq_detected = false;
     while (std::getline(file, line)) {
         if (line.empty()) continue;
+
+        // If frequency column exists, extract freq from first data row
+        if (freq_col >= 0 && !freq_detected) {
+            std::vector<std::string> fields;
+            std::istringstream lss(line);
+            std::string f;
+            while (std::getline(lss, f, ',')) fields.push_back(std::move(f));
+            if (static_cast<size_t>(freq_col) < fields.size()) {
+                KlineFreq detected = parse_freq_string(fields[freq_col]);
+                if (detected != KlineFreq::kDay || freq == KlineFreq::kDay) {
+                    freq = detected;
+                }
+            }
+            freq_detected = true;
+        }
 
         std::string symbol;
         int64_t ts = 0;
         event::KlineRow row{};
         if (parse_csv_row(line, symbol, ts, row)) {
             row.timestamp = ts;
-            symbol_rows[symbol].push_back(row);
+            symbol_rows[symbol].push_back(std::move(row));
             rows_loaded_.fetch_add(1, std::memory_order_relaxed);
         } else {
             rows_failed_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
-    // Batch write per symbol, using the specified frequency
+    // Batch write per symbol, using the specified (or detected) frequency
     for (auto& [sym, rows] : symbol_rows) {
         engine_.store_kline_batch(sym, kline_freq_to_data_type(freq), rows);
     }
@@ -164,7 +241,8 @@ int DataInitializer::load_csv_dir(const std::string& dir_path) {
         if (path.back() != '/') path += '/';
         path += name;
 
-        if (load_csv(path)) {
+        KlineFreq freq = infer_freq_from_filename(name);
+        if (load_csv(path, freq)) {
             count++;
         }
     }

@@ -14,6 +14,11 @@ namespace quant::storage { class StorageEngine; }
 
 namespace quant::storage {
 
+// Infer K-line frequency from filename based on substrings:
+// "1min"/"5min"/"15min"/"30min"/"60min" → corresponding KlineFreq
+// "day" or no match → KlineFreq::kDay (default)
+KlineFreq infer_freq_from_filename(const std::string& filename);
+
 struct LoadStats {
     int files_loaded{0};
     int rows_loaded{0};
