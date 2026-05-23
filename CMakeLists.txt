@@ -272,7 +272,7 @@ add_library(quant_strategy
     cpp/quant/strategy/strategy_runner.cc
 )
 target_include_directories(quant_strategy PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(quant_strategy PUBLIC quant_execution quant_event quant_factor quant_ir quant_storage)
+target_link_libraries(quant_strategy PUBLIC quant_logging quant_execution quant_event quant_factor quant_ir quant_storage)
 
 # ── portfolio library ──
 add_library(quant_portfolio
@@ -598,7 +598,7 @@ add_library(quant_api
     cpp/quant/api/strategy_api.cc
 )
 target_include_directories(quant_api PUBLIC ${CMAKE_SOURCE_DIR})
-target_link_libraries(quant_api PUBLIC quant_strategy quant_backtest quant_storage quant_event)
+target_link_libraries(quant_api PUBLIC quant_logging quant_strategy quant_backtest quant_storage quant_event)
 
 # ── Strategy API test ──
 add_executable(strategy_api_test cpp/test/strategy_api_test.cc)

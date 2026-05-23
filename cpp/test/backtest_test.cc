@@ -3,16 +3,15 @@
 
 #include <cmath>
 
-#include "cpp/quant/backtest/simulated_broker.h"
 #include "cpp/quant/backtest/backtest_runner.h"
-#include "cpp/quant/event/event_bus.h"
+#include "cpp/quant/backtest/simulated_broker.h"
 #include "cpp/quant/execution/order.h"
 #include "cpp/quant/portfolio/portfolio.h"
+#include "cpp/quant/storage/column_block.h"
 
 namespace bt = quant::backtest;
 namespace pf = quant::portfolio;
 namespace ex = quant::execution;
-namespace ev = quant::event;
 
 // ── Portfolio tests ──
 
@@ -144,5 +143,5 @@ TEST(BacktestResultTest, EmptyResult) {
 TEST(BacktestParamsTest, DefaultValues) {
     bt::BacktestParams params;
     EXPECT_DOUBLE_EQ(params.initial_cash, 1000000.0);
-    EXPECT_EQ(params.kline_type, ev::DataType::kKlineDay);
+    EXPECT_EQ(params.kline_type, static_cast<uint8_t>(quant::storage::KlineFreq::kDay));
 }

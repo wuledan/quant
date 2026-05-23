@@ -2,6 +2,7 @@
 #include "cpp/quant/strategy/strategy_runner.h"
 
 #include "cpp/quant/factor/op_registry.h"
+#include "cpp/quant/infra/logging/logger.h"
 #include "cpp/quant/storage/storage_engine.h"
 
 namespace quant::strategy {
@@ -79,6 +80,9 @@ infra::CoTask<void> StrategyRunner::run() {
     registry_ = std::make_unique<factor::FactorRegistry>();
     dag_ = factor::FactorDAG::from_graph(graph_, *registry_);
     if (!dag_ || !dag_->is_built()) {
+        infra::default_logger().error(
+            "StrategyRunner: failed to build DAG from graph, strategy_id=" +
+            std::to_string(strategy_id_));
         running_.store(false, std::memory_order_release);
         co_return;
     }

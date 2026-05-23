@@ -53,7 +53,7 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
     }
 
     // Load kline data via new KlineRow API
-    auto klines = storage_.query_kline(params.symbol, static_cast<uint8_t>(params.kline_type),
+    auto klines = storage_.query_kline(params.symbol, params.kline_type,
                                         params.start_time, params.end_time);
     if (klines.empty()) return {};
 
@@ -95,6 +95,8 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
 
     // Factor value storage: factor_name → vector of values
     std::unordered_map<std::string, std::vector<double>> factor_values;
+
+    BacktestResult result;
 
     // Running window for factor computation
     for (size_t i = 0; i < num_bars; ++i) {
@@ -194,6 +196,14 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
                             current_price, ts);
                         portfolio.on_fill(fill.symbol, fill.side,
                                           fill.quantity, fill.price, fill.commission);
+
+                        // Record trade
+                        TradeEntry trade;
+                        trade.timestamp = ts;
+                        trade.price = fill.price;
+                        trade.side = (fill.side == execution::OrderSide::kBuy) ? "buy" : "sell";
+                        trade.quantity = static_cast<int64_t>(fill.quantity);
+                        result.trades.push_back(std::move(trade));
                     }
                 }
             }
@@ -204,7 +214,6 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
     }
 
     // Calculate metrics
-    BacktestResult result;
     result.nav_curve = portfolio.nav_history();
     result.total_trades = static_cast<int64_t>(order_mgr.total_order_count());
 

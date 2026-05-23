@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "cpp/quant/backtest/backtest_runner.h"
+#include "cpp/quant/infra/logging/logger.h"
 #include "cpp/quant/ir/ir_graph.h"
 #include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/storage_engine.h"
@@ -17,6 +18,8 @@
 
 namespace quant::api {
 namespace {
+
+using infra::default_logger;
 
 // ── Minimal JSON serializer (same pattern as ir_graph.cc) ──
 
@@ -662,8 +665,7 @@ ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) 
                 } else if (k == "symbol") {
                     params.symbol = p.parse_string();
                 } else if (k == "kline_type") {
-                    params.kline_type = static_cast<event::DataType>(
-                        static_cast<int>(p.parse_number()));
+                    params.kline_type = static_cast<uint8_t>(p.parse_number());
                 } else {
                     p.skip_value();
                 }
@@ -872,13 +874,21 @@ ApiResponse StrategyApi::start_live_strategy(uint64_t id) {
     // Load IR graph
     ir::StrategyGraph graph;
     try {
+        default_logger().info("Loading graph from: " + entry->graph_path);
         graph = ir::StrategyGraph::load_from_file(entry->graph_path);
+        default_logger().info("Graph loaded: strategy_name=" + graph.strategy_name +
+                              ", nodes=" + std::to_string(graph.nodes.size()) +
+                              ", edges=" + std::to_string(graph.edges.size()));
     } catch (const std::exception& e) {
+        default_logger().error("Failed to load graph from '" + entry->graph_path +
+                               "': " + e.what());
         return error_response(500, std::string("Failed to load graph: ") + e.what());
     }
 
     auto result = engine_.start_live(id, graph);
     if (!result.has_value()) {
+        default_logger().error("Cannot start live strategy id=" + std::to_string(id) +
+                               ": start_live returned nullopt");
         return error_response(409, "Cannot start live strategy");
     }
 
@@ -976,6 +986,19 @@ std::string StrategyApi::result_to_json(const backtest::BacktestResult& result) 
         w.key("nav"); w.num_val(nav);
         w.end_obj();
         if (i + 1 < result.nav_curve.size()) w.comma();
+    }
+    w.end_arr(); w.comma();
+
+    w.key("trades"); w.begin_arr();
+    for (size_t i = 0; i < result.trades.size(); ++i) {
+        const auto& t = result.trades[i];
+        w.begin_obj();
+        w.key("timestamp"); w.int_val(t.timestamp); w.comma();
+        w.key("price"); w.num_val(t.price); w.comma();
+        w.key("side"); w.str_val(t.side); w.comma();
+        w.key("quantity"); w.int_val(t.quantity);
+        w.end_obj();
+        if (i + 1 < result.trades.size()) w.comma();
     }
     w.end_arr();
 

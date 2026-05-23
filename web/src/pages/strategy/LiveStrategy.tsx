@@ -74,6 +74,7 @@ const LiveStrategy: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const [status, setStatus] = useState<LiveStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [polling, setPolling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [klineData, setKlineData] = useState<KlinePoint[]>([]);
   const [liveSignal, setLiveSignal] = useState<LiveSignal | null>(null);
@@ -89,6 +90,7 @@ const LiveStrategy: React.FC = () => {
 
   const fetchStatus = useCallback(async () => {
     if (!id) return;
+    setPolling(true);
     try {
       const res = await fetch(`${API_BASE}/strategies/${id}/live_status`);
       if (!res.ok) throw new Error('获取状态失败');
@@ -102,6 +104,7 @@ const LiveStrategy: React.FC = () => {
       setError(e instanceof Error ? e.message : '未知错误');
     } finally {
       setLoading(false);
+      setPolling(false);
     }
   }, [id]);
 
@@ -284,7 +287,9 @@ const LiveStrategy: React.FC = () => {
 
   /* ---- derived data ---- */
 
-  const factorTableData = Object.entries(factorValues).map(([k, v]) => ({ key: k, name: k, value: v }));
+  const factorTableData = Object.entries(factorValues)
+    .map(([k, v]) => ({ key: k, name: k, value: v }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const signalColor = liveSignal ? signalColorMap[liveSignal.type] || 'default' : 'default';
   const signalLabel = liveSignal ? signalLabelMap[liveSignal.type] || liveSignal.type : '-';
@@ -328,6 +333,7 @@ const LiveStrategy: React.FC = () => {
             : <Tag>WebSocket 未连接</Tag>}
         </Title>
         <Space>
+          {polling && <Spin size="small" />}
           <Button icon={<ReloadOutlined />} onClick={fetchStatus}>刷新</Button>
           {status.status === 'running' ? (
             <Button icon={<PauseCircleOutlined />} onClick={handleStopLive} danger>停止实盘</Button>
@@ -337,6 +343,16 @@ const LiveStrategy: React.FC = () => {
         </Space>
       </div>
 
+      {status.status === 'stopped' ? (
+        <div style={{ textAlign: 'center', padding: '80px 0' }}>
+          <Empty description="策略未运行，无法获取实时数据">
+            <Button type="primary" size="large" icon={<PlayCircleOutlined />} onClick={handleStartLive}>
+              启动实盘
+            </Button>
+          </Empty>
+        </div>
+      ) : (
+        <>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={8} md={4}>
           <Card size="small">
@@ -422,6 +438,8 @@ const LiveStrategy: React.FC = () => {
           </Card>
         </Col>
       </Row>
+        </>
+      )}
     </div>
   );
 };

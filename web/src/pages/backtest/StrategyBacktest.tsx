@@ -272,7 +272,7 @@ const StrategyBacktest: React.FC = () => {
           form={form}
           layout="inline"
           onFinish={handleSubmit}
-          initialValues={{ initial_capital: 1000000, symbol: undefined }}
+          initialValues={{ initial_capital: 1000000, symbol: undefined, dateRange: [dayjs().subtract(1, 'month'), dayjs()] }}
           style={{ flexWrap: 'wrap', gap: 8 }}
         >
           <Form.Item name="symbol" label="标的" rules={[{ required: true, message: '请选择标的' }]}>
@@ -330,7 +330,7 @@ const StrategyBacktest: React.FC = () => {
         <>
           <Title level={5}>绩效指标</Title>
           <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic
                   title="总收益率"
@@ -341,7 +341,7 @@ const StrategyBacktest: React.FC = () => {
                 />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic
                   title="年化收益"
@@ -352,12 +352,12 @@ const StrategyBacktest: React.FC = () => {
                 />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic title="夏普比率" value={result.metrics.sharpe_ratio} precision={2} />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic
                   title="最大回撤"
@@ -368,17 +368,17 @@ const StrategyBacktest: React.FC = () => {
                 />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic title="胜率" value={result.metrics.win_rate * 100} suffix="%" precision={1} />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic title="盈亏比" value={result.metrics.profit_factor} precision={2} />
               </Card>
             </Col>
-            <Col xs={12} sm={8} md={6} lg={3}>
+            <Col xs={12} lg={6}>
               <Card size="small">
                 <Statistic title="交易次数" value={result.metrics.total_trades} />
               </Card>
@@ -403,7 +403,7 @@ const StrategyBacktest: React.FC = () => {
                 dataSource={result.trades}
                 columns={tradeColumns}
                 rowKey={(_, idx) => `${idx}`}
-                pagination={{ pageSize: 10, showSizeChanger: false }}
+                pagination={{ pageSize: 10, showSizeChanger: true, pageSizeOptions: ['5', '10', '20', '50'], showTotal: (total) => `共 ${total} 条` }}
                 size="small"
                 bordered
                 locale={{ emptyText: '暂无交易记录' }}

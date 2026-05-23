@@ -6,6 +6,7 @@
 #include "cpp/quant/factor/factor_dag.h"
 #include "cpp/quant/factor/factor_registry.h"
 #include "cpp/quant/factor/op_registry.h"
+#include "cpp/quant/infra/logging/logger.h"
 #include "cpp/quant/ir/ir_graph.h"
 #include <folly/futures/Future.h>
 
@@ -14,6 +15,7 @@
 #include "cpp/quant/strategy/signal_handler.h"
 
 namespace quant::strategy {
+using infra::default_logger;
 
 StrategyEngine::StrategyEngine(event::EventBus& bus, storage::StorageEngine& storage)
     : bus_(bus), storage_(storage) {}
@@ -96,11 +98,14 @@ std::optional<SignalResult>
 StrategyEngine::start_live(uint64_t strategy_id,
                             const ir::StrategyGraph& graph) {
     auto* entry = registry_.find(strategy_id);
-    if (!entry) return std::nullopt;
+    if (!entry) {
+        default_logger().error("start_live: strategy not found in registry");
+        return std::nullopt;
+    }
 
     // Check if already running
     if (live_runners_.count(strategy_id)) {
-        // Return current signal if already running
+        default_logger().info("start_live: already running, returning latest signal");
         return live_runners_[strategy_id]->latest_signal();
     }
 
@@ -111,13 +116,26 @@ StrategyEngine::start_live(uint64_t strategy_id,
     // Launch the coroutine on the global executor (fire-and-forget)
     auto* executor = network::GlobalExecutor::instance().executor();
     if (executor) {
-        (void)std::move(runner->run())
-            .scheduleOn(executor)
-            .start();
+        default_logger().info("start_live: launching runner on global executor");
+        (void)folly::coro::co_withExecutor(executor, runner->run()).start();
+    } else {
+        default_logger().warn("start_live: global executor not available, runner will not start");
     }
 
     live_runners_[strategy_id] = std::move(runner);
-    return live_runners_[strategy_id]->latest_signal();
+    default_logger().info("start_live: strategy started successfully");
+
+    // Return a valid initial signal (side=0 = hold) to indicate successful startup.
+    // latest_signal() is not meaningful yet because no kline events have been
+    // processed by the runner's coroutine.
+    SignalResult init;
+    init.timestamp = 0;
+    init.symbol = "";
+    init.price = 0.0;
+    init.side = 0;       // hold
+    init.quantity = 0;
+    init.confidence = 0.0;
+    return init;
 }
 
 void StrategyEngine::stop_live(uint64_t strategy_id) {

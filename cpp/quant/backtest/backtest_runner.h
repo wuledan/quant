@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "cpp/quant/event/event_bus.h"
+#include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/storage_engine.h"
 
 namespace quant::ir { struct StrategyGraph; }
@@ -18,7 +19,14 @@ struct BacktestParams {
     int64_t start_time = 0;
     int64_t end_time = 0;
     std::string symbol;
-    event::DataType kline_type = event::DataType::kKlineDay;
+    uint8_t kline_type = static_cast<uint8_t>(storage::KlineFreq::kDay);
+};
+
+struct TradeEntry {
+    int64_t timestamp = 0;
+    double price = 0.0;
+    std::string side;   // "buy" or "sell"
+    int64_t quantity = 0;
 };
 
 struct BacktestResult {
@@ -28,6 +36,7 @@ struct BacktestResult {
     double sharpe_ratio = 0.0;
     int64_t total_trades = 0;
     std::vector<std::pair<int64_t, double>> nav_curve;
+    std::vector<TradeEntry> trades;
 };
 
 class BacktestRunner {
