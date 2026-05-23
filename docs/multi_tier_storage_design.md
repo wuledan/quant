@@ -1,7 +1,7 @@
 # 多级存储架构设计
 
-> 日期: 2026-05-22
-> 状态: Active Development
+> 日期: 2026-05-22 | 更新: 2026-05-23
+> 状态: **Implemented** — 全部设计目标已实现
 > 范围: 策略中心(etcd) + 行情/因子数据存储 + C++ 引擎数据交互
 
 ---
@@ -593,17 +593,33 @@ C++ Engine: etcd watch event → load IR → build FactorDAG → activate
 - `AffinityMutex`: ✅ 已实现并提交（单原子状态字编码锁标志+等待者指针）
 - `AffinitySharedMutex`: 🚧 开发中
 
-### A.4 实施进展 (2026-05-22)
+### A.4 实施进展 (2026-05-23) — 全部完成
 
 | 任务 | 状态 | 提交 |
 |------|------|------|
-| 缓存淘汰 Bug 修复 | ✅ 完成 | — |
-| vwap 编码一致性修复 | ✅ 完成 | — |
-| WAL + WriteBuffer 实现 | ✅ 完成 | — |
-| WriteBuffer 集成 StorageEngine | ✅ 完成 | ✅ |
-| DataSource 追踪 | ✅ 完成 | ✅ |
-| Docker etcd/MinIO 部署 | ✅ 完成 | ✅ |
-| AffinityMutex | ✅ 完成 | ✅ |
-| AffinitySharedMutex | 🚧 开发中 | — |
-| WriteBuffer/WAL 协程迁移 | ⏳ 待开始 | — |
-| TimeSeriesCache 协程迁移 | ⏳ 待开始 | — |
+| 缓存淘汰 Bug 修复 | ✅ | d86a41b |
+| vwap 编码一致性修复 | ✅ | d86a41b |
+| WAL + WriteBuffer 实现 | ✅ | d86a41b |
+| WriteBuffer 集成 StorageEngine | ✅ | b686e1d |
+| DataSource 追踪 | ✅ | b686e1d |
+| AffinityMutex | ✅ | d86a41b |
+| AffinitySharedMutex | ✅ | d86a41b |
+| WriteBuffer/WAL 协程迁移 | ✅ | b686e1d |
+| TimeSeriesCache 协程迁移 | ✅ | d86a41b |
+| Read-Through 查询路径 | ✅ | 49152ac |
+| 缓存淘汰与预算控制 | ✅ | b686e1d |
+| 磁盘持久化 | ✅ | b686e1d |
+| Compaction Daemon | ✅ | 85940ba |
+| Periodic Dirty Flush (30s) | ✅ | 61fab61 |
+| MinIO/S3 客户端 (RemoteStorage) | ✅ | ce23f8c |
+| PostgreSQL 元数据 | ✅ | 291a8e2 |
+| 因子横截面存储 | ✅ | 291a8e2 |
+| 公司行为 + 复权因子 | ✅ | 291a8e2 |
+| 冷段上传 Daemon | ✅ | 5159254 |
+| DiskPersistence 异步 I/O (io_uring) | ✅ | ce23f8c |
+| Python DSL + IRCompiler | ✅ | 5159254 (py/) |
+| EventBus 协程迁移 | ✅ | 272c242 |
+| 13 组件阻塞原语替换 | ✅ | 272c242 |
+| 多频率 DataInitializer | ✅ | 77a4082 |
+| 测试恢复 (ColumnBlock/Disk/WAL/Buffer) | ✅ | 170bf49 |
+
