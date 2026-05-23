@@ -98,6 +98,14 @@ if(QUANT_USE_FOLLY)
     endif()
 endif()
 
+# ── hwloc (NUMA topology discovery) ──
+find_path(HWLOC_INCLUDE_DIR hwloc.h)
+find_library(HWLOC_LIBRARY hwloc)
+if(NOT HWLOC_INCLUDE_DIR OR NOT HWLOC_LIBRARY)
+    message(FATAL_ERROR "hwloc not found — install libhwloc-dev")
+endif()
+message(STATUS "hwloc: ${HWLOC_INCLUDE_DIR} / ${HWLOC_LIBRARY}")
+
 # ── infra library ──
 add_library(quant_infra
     cpp/quant/infra/error_codes.cc
@@ -116,13 +124,14 @@ target_include_directories(quant_infra PUBLIC
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/cpp/quant/infra
 )
+target_include_directories(quant_infra SYSTEM PUBLIC ${HWLOC_INCLUDE_DIR})
 target_compile_features(quant_infra PUBLIC cxx_std_20)
 
 if(QUANT_USE_FOLLY)
     # FetchContent builds use the target name without namespace (folly, folly_coro),
     # while find_package uses the namespace (Folly::folly, Folly::folly_coro).
     # Since we use FetchContent, reference the un-namespaced targets.
-    target_link_libraries(quant_infra PUBLIC folly)
+    target_link_libraries(quant_infra PUBLIC folly ${HWLOC_LIBRARY})
     target_compile_definitions(quant_infra PUBLIC QUANT_USE_FOLLY)
 endif()
 

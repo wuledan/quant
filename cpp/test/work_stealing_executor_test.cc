@@ -303,6 +303,8 @@ TEST(WorkStealingExecutorTest, NoThreadGrowth) {
         fut.wait_for(std::chrono::seconds(5));
     }
 
+    // Allow idle workers on other NUMA nodes to reach parked state
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     auto stats = ex.stats();
     EXPECT_EQ(stats.active_workers, 4u);
 

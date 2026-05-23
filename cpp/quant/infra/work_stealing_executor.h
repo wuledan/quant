@@ -28,6 +28,8 @@
 #include <thread>
 #include <vector>
 
+#include <hwloc.h>
+
 namespace quant::infra {
 
 // ── WorkStealingExecutor ──
@@ -140,6 +142,10 @@ private:
         std::atomic<uint64_t> local_pops{0};
         std::atomic<uint64_t> steals_from_me{0};
         std::atomic<uint64_t> tasks_completed{0};
+
+        // ── NUMA / CPU pinning (set during construction) ──
+        int hwloc_cpu{0};    // assigned physical PU ID
+        int numa_node{0};    // assigned NUMA node index
     };
 
     // ── Internal methods ──
@@ -160,6 +166,10 @@ private:
     std::string name_prefix_;
 
     folly::UMPMCQueue<WorkItem, false, 6> global_queue_;
+
+    // ── NUMA topology (set during construction) ──
+    std::vector<int> numa_nodes_;                  // per-worker NUMA node index
+    std::vector<std::vector<size_t>> numa_peers_;  // per-NUMA-group worker ID list
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
