@@ -303,14 +303,12 @@ ApiResponse StrategyApi::list_strategies() {
     auto entries = engine_.registry().list_strategies();
 
     JsonWriter w;
-    w.begin_obj();
-    w.key("strategies"); w.begin_arr();
+    w.begin_arr();
     for (size_t i = 0; i < entries.size(); ++i) {
         w.os << entry_to_json(entries[i]);
         if (i + 1 < entries.size()) w.comma();
     }
     w.end_arr();
-    w.end_obj();
 
     return success_response(w.os.str());
 }
@@ -750,20 +748,9 @@ ApiResponse StrategyApi::handle_data(const std::string& method,
                                       const std::string& body) {
     // GET /api/data/kline?symbol=&interval=&start=&end=
     if (segments.size() >= 3 && segments[2] == "kline" && method == "GET") {
+        // Return plain array matching frontend KlineData[]
         JsonWriter w;
-        w.begin_obj();
-        w.key("data"); w.begin_arr();
-        w.end_arr();
-        w.end_obj();
-        return success_response(w.os.str());
-    }
-    // GET /api/data/depth?symbol=
-    if (segments.size() >= 3 && segments[2] == "depth" && method == "GET") {
-        JsonWriter w;
-        w.begin_obj();
-        w.key("bids"); w.begin_arr(); w.end_arr(); w.comma();
-        w.key("asks"); w.begin_arr(); w.end_arr();
-        w.end_obj();
+        w.begin_arr(); w.end_arr();
         return success_response(w.os.str());
     }
     // GET /api/data/ticker?symbol=
@@ -783,24 +770,22 @@ ApiResponse StrategyApi::handle_data(const std::string& method,
 
 ApiResponse StrategyApi::handle_symbols() {
     JsonWriter w;
-    w.begin_obj();
-    w.key("symbols"); w.begin_arr();
+    w.begin_arr();
 
-    // Return symbols loaded from CSV files (hardcoded for now)
-    const char* symbols[] = {"000001.SZ", "000002.SZ", "300750.SZ",
-                             "600519.SH", "000300.SH", "399001.SZ", "399006.SZ"};
-    for (size_t i = 0; i < sizeof(symbols) / sizeof(symbols[0]); ++i) {
+    const char* syms[] = {"000001.SZ", "000002.SZ", "300750.SZ",
+                          "600519.SH", "000300.SH", "399001.SZ", "399006.SZ"};
+    size_t n = sizeof(syms) / sizeof(syms[0]);
+    for (size_t i = 0; i < n; ++i) {
         w.begin_obj();
-        w.key("symbol"); w.str_val(symbols[i]); w.comma();
-        w.key("name"); w.str_val(symbols[i]); w.comma();
+        w.key("symbol"); w.str_val(syms[i]); w.comma();
+        w.key("name"); w.str_val(syms[i]); w.comma();
         w.key("exchange"); w.str_val(
-            std::string(symbols[i]).find(".SH") != std::string::npos ? "SH" : "SZ");
+            std::string(syms[i]).find(".SH") != std::string::npos ? "SH" : "SZ");
         w.end_obj();
-        if (i + 1 < sizeof(symbols) / sizeof(symbols[0])) w.comma();
+        if (i + 1 < n) w.comma();
     }
 
     w.end_arr();
-    w.end_obj();
     return success_response(w.os.str());
 }
 
