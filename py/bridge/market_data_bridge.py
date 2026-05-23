@@ -1,13 +1,13 @@
-# market_data_bridge.py — AKShare→TCP length-prefixed JSON bridge
+# market_data_bridge.py — AKShare(Tencent)→TCP length-prefixed JSON bridge
 #
 # Protocol (matching C++ DataIngestor):
 #   [4 bytes: uint32_t payload length (network byte order)]
 #   [N bytes: JSON payload]
 #
-# Uses curl subprocess for HTTP (trusted proxy compatibility).
+# Uses AKShare stock_zh_a_hist_tx (Tencent finance) — no token, no proxy needed.
 #
 # Usage:
-#   HTTPS_PROXY=http://127.0.0.1:7890 python3 py/bridge/market_data_bridge.py
+#   python3 py/bridge/market_data_bridge.py --port 9000 --symbols 000001.SZ,600519.SH
 #   DataIngestor connects to localhost:9000
 
 import argparse
@@ -16,10 +16,9 @@ import json
 import logging
 import os
 import struct
-import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -27,91 +26,76 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 logging.basicConfig(level=logging.INFO, format="[Bridge] %(message)s")
 log = logging.getLogger(__name__)
 
-PROXY = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or ""
+# Clear proxy for CN direct access
+for _k in list(os.environ.keys()):
+    if 'proxy' in _k.lower():
+        del os.environ[_k]
+
+import akshare as ak
 
 
-# ── Curl-based data fetcher ──
-
-def fetch_eastmoney_kline(symbol_raw: str, days: int = 5):
-    """Pull recent daily kline from eastmoney API via curl.
-
-    Eastmoney API: push2his.eastmoney.com
-    secid: 0.{code} for SZ, 1.{code} for SH
-    """
+def _to_tx_symbol(symbol_raw: str) -> str:
+    """Convert 000001.SZ → sz000001, 600519.SH → sh600519"""
     code = symbol_raw.replace(".SZ", "").replace(".SH", "")
-    market = "0" if symbol_raw.endswith("SZ") else "1"
-    secid = f"{market}.{code}"
+    market = "sz" if symbol_raw.endswith("SZ") else "sh"
+    return f"{market}{code}"
 
-    today = datetime.now()
-    beg = (today - timedelta(days=days + 3)).strftime("%Y%m%d")
-    end = today.strftime("%Y%m%d")
 
-    url = (
-        f"https://push2his.eastmoney.com/api/qt/stock/kline/get?"
-        f"fields1=f1,f2,f3,f4,f5,f6"
-        f"&fields2=f51,f52,f53,f54,f55,f56,f57"
-        f"&ut=7eea3edcaed734bea9cbfc24409ed989"
-        f"&klt=101&fqt=1&secid={secid}&beg={beg}&end={end}"
-    )
-
-    cmd = ["curl", "-s", "--max-time", "15"]
-    if PROXY:
-        cmd += ["-x", PROXY]
-    cmd.append(url)
-
+def fetch_kline(symbol_raw: str, days: int = 5):
+    """Pull recent daily kline from Tencent finance via AKShare."""
+    tx_code = _to_tx_symbol(symbol_raw)
+    today = datetime.now().strftime("%Y%m%d")
+    # Look back ~1 year
+    start_date = f"{datetime.now().year - 1}0101"
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-        if result.returncode != 0:
-            log.debug(f"curl failed for {symbol_raw}: {result.stderr[:100]}")
-            return []
-        data = json.loads(result.stdout)
-        klines = data.get("data", {}).get("klines", [])
-        if not klines:
+        df = ak.stock_zh_a_hist_tx(symbol=tx_code, start_date=start_date, end_date=today)
+        if df is None or df.empty:
             return []
 
-        results = []
-        for line in klines:
-            parts = line.split(",")
-            if len(parts) < 7:
+        rows = []
+        for _, row in df.iterrows():
+            try:
+                ts = int(datetime.strptime(str(row["date"]), "%Y-%m-%d").timestamp() * 1_000_000)
+            except Exception:
                 continue
-            # parts: date,open,high,low,close,volume,amount
-            ts = int(datetime.strptime(parts[0], "%Y-%m-%d").timestamp() * 1_000_000)
-            results.append({
+            rows.append({
                 "symbol": symbol_raw,
                 "ts": ts,
-                "open": float(parts[1]),
-                "high": float(parts[2]),
-                "low": float(parts[3]),
-                "close": float(parts[4]),
-                "volume": int(float(parts[5])),
-                "amount": int(float(parts[6])),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": int(float(row.get("volume", 0))),
+                "amount": int(float(row.get("amount", 0))),
             })
-        return results
+        # Return last N days
+        return rows[-days:] if len(rows) > days else rows
     except Exception as e:
         log.warning(f"fetch failed for {symbol_raw}: {e}")
         return []
 
 
-# ── TCP Bridge Server ──
-
 async def handle_client(reader, writer, state):
     addr = writer.get_extra_info("peername")
     log.info(f"DataIngestor connected from {addr}")
 
+    total = 0
     try:
         for sym in state["symbols"]:
-            rows = fetch_eastmoney_kline(sym, days=state["lookback_days"])
-            for row in rows:
-                payload = json.dumps(row).encode()
-                header = struct.pack("!I", len(payload))
-                writer.write(header + payload)
+            try:
+                rows = fetch_kline(sym, days=state["lookback_days"])
+                for row in rows:
+                    payload = json.dumps(row).encode()
+                    header = struct.pack("!I", len(payload))
+                    writer.write(header + payload)
+                total += len(rows)
+            except Exception as e:
+                log.warning(f"fetch {sym}: {e}")
 
         await writer.drain()
-        total = sum(1 for sym in state["symbols"]
-                    for _ in fetch_eastmoney_kline(sym, days=1))
-        log.info(f"Sent batch for {len(state['symbols'])} symbols to {addr}")
+        log.info(f"Sent {total} klines for {len(state['symbols'])} symbols")
 
-        # Keep connection alive, push periodic updates
+        # Keep alive + periodic push
         while True:
             try:
                 data = await asyncio.wait_for(reader.read(1024),
@@ -120,50 +104,48 @@ async def handle_client(reader, writer, state):
                     break
             except asyncio.TimeoutError:
                 for sym in state["symbols"]:
-                    rows = fetch_eastmoney_kline(sym, days=1)
+                    rows = fetch_kline(sym, days=1)
                     for row in rows:
                         payload = json.dumps(row).encode()
                         header = struct.pack("!I", len(payload))
                         writer.write(header + payload)
                 await writer.drain()
+                log.debug(f"Pushed update")
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
         writer.close()
         await writer.wait_closed()
-        log.info(f"DataIngestor disconnected from {addr}")
+        log.info(f"DataIngestor disconnected ({total} klines sent)")
 
 
 async def run_bridge(host, port, symbols, freq, lookback_days, poll_sec):
     state = {
-        "symbols": symbols,
-        "freq": freq,
-        "lookback_days": lookback_days,
-        "poll_interval": poll_sec,
+        "symbols": symbols, "freq": freq,
+        "lookback_days": lookback_days, "poll_interval": poll_sec,
     }
     server = await asyncio.start_server(
         lambda r, w: handle_client(r, w, state), host, port
     )
     log.info(f"Bridge listening on {host}:{port}")
-    log.info(f"Symbols: {symbols}, freq={freq}, poll={poll_sec}s")
-    log.info(f"Proxy: {PROXY or 'DIRECT'}")
+    log.info(f"Source: Tencent Finance (AKShare stock_zh_a_hist_tx)")
+    log.info(f"Symbols: {symbols}, poll={poll_sec}s")
     async with server:
         await server.serve_forever()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Market Data Bridge (curl-based)")
+    parser = argparse.ArgumentParser(description="Market Data Bridge (Tencent/AKShare)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--symbols", default="000001.SZ,600519.SH,300750.SZ")
     parser.add_argument("--freq", default="daily")
-    parser.add_argument("--lookback", type=int, default=5)
-    parser.add_argument("--poll", type=int, default=60)
+    parser.add_argument("--lookback", type=int, default=30)
+    parser.add_argument("--poll", type=int, default=60, help="Poll interval (seconds)")
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",")]
-    log.info("Starting Market Data Bridge (curl-based, eastmoney API)")
-
+    log.info("Starting Market Data Bridge — Tencent Finance")
     try:
         asyncio.run(run_bridge(args.host, args.port, symbols, args.freq,
                                 args.lookback, args.poll))
