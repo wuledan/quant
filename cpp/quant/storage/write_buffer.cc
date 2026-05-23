@@ -16,7 +16,8 @@ WriteBuffer::WriteBuffer(StorageEngine& engine, Options opts)
 }
 
 WriteBuffer::~WriteBuffer() {
-    stop_background_flush();
+    stopped_.store(true);
+    // Let background task complete via polling-wait in flush_scope_'s destructor
     flush();
 }
 
@@ -120,6 +121,11 @@ void WriteBuffer::start_background_flush(folly::Executor* executor) {
 
 void WriteBuffer::stop_background_flush() {
     stopped_.store(true);
+    // Brief wait for background loop to exit (it polls stopped_ on each sleep cycle)
+    for (int i = 0; i < static_cast<int>(opts_.flush_interval.count()) + 100; i += 50) {
+        if (flush_scope_.remaining() == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 folly::coro::Task<void> WriteBuffer::background_flush_loop() {
