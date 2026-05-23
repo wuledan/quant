@@ -66,8 +66,8 @@ int main(int argc, char* argv[]) {
 
     // ── 1. Initialize GlobalExecutor ──
     auto& global_exec = network::GlobalExecutor::instance();
-    global_exec.init();
-    std::cout << "[Service] GlobalExecutor initialized\n";
+    global_exec.init(32);
+    std::cout << "[Service] GlobalExecutor initialized (32 workers)\n";
 
     // ── 2. Create StorageEngine ──
     storage::StorageEngine::Options storage_opts;
