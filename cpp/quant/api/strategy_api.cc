@@ -250,9 +250,29 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
     }
     // /api/data/daily/:symbol (before general data handler)
     if (segments[1] == "data" && segments.size() >= 4 && segments[2] == "daily") {
+        // Parse date range from query: start_date=2026-05-01&end_date=2026-05-26
+        int64_t range_start = 0, range_end = INT64_MAX;
+        auto parse_date = [](const std::string& s) -> int64_t {
+            if (s.size() < 10) return 0;
+            struct tm tm = {};
+            tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+            tm.tm_mon = std::stoi(s.substr(5, 2)) - 1;
+            tm.tm_mday = std::stoi(s.substr(8, 2));
+            return static_cast<int64_t>(timegm(&tm)) * 1'000'000;
+        };
+        for (size_t i = 0; i + 6 < query.size(); ) {
+            size_t eq = query.find('=', i), amp = query.find('&', eq);
+            if (eq == std::string::npos) break;
+            std::string key = query.substr(i, eq - i);
+            std::string val = query.substr(eq + 1, amp == std::string::npos ? query.size() - eq - 1 : amp - eq - 1);
+            if (key == "start_date") range_start = parse_date(val);
+            if (key == "end_date") range_end = parse_date(val) + 86400LL * 1'000'000; // end of day
+            if (amp == std::string::npos) break;
+            i = amp + 1;
+        }
         JsonWriter w;
         w.begin_arr();
-        auto rows = storage_.query_kline(segments[3], 7, 0, INT64_MAX);
+        auto rows = storage_.query_kline(segments[3], 7, range_start, range_end);
         for (size_t i = 0; i < rows.size(); ++i) {
             w.begin_obj();
             w.key("timestamp"); w.int_val(rows[i].timestamp / 1000); w.comma();
@@ -822,11 +842,31 @@ ApiResponse StrategyApi::handle_data(const std::string& method,
             i = amp + 1;
         }
 
+        // Parse date range from query
+        int64_t range_start = 0, range_end = INT64_MAX;
+        auto parse_date = [](const std::string& s) -> int64_t {
+            if (s.size() < 10) return 0;
+            struct tm tm = {};
+            tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+            tm.tm_mon = std::stoi(s.substr(5, 2)) - 1;
+            tm.tm_mday = std::stoi(s.substr(8, 2));
+            return static_cast<int64_t>(timegm(&tm)) * 1'000'000;
+        };
+        for (size_t j = 0; j + 6 < query.size(); ) {
+            size_t eq = query.find('=', j), amp = query.find('&', eq);
+            if (eq == std::string::npos) break;
+            std::string key = query.substr(j, eq - j);
+            std::string val = query.substr(eq + 1, amp == std::string::npos ? query.size() - eq - 1 : amp - eq - 1);
+            if (key == "start_date") range_start = parse_date(val);
+            if (key == "end_date") range_end = parse_date(val) + 86400LL * 1'000'000;
+            if (amp == std::string::npos) break;
+            j = amp + 1;
+        }
+
         JsonWriter w;
         w.begin_arr();
         if (!symbol.empty()) {
-            // Query storage engine: all data for this symbol, KlineFreq::kDay = 7
-            auto rows = storage_.query_kline(symbol, static_cast<uint8_t>(storage::KlineFreq::kDay), 0, INT64_MAX);
+            auto rows = storage_.query_kline(symbol, static_cast<uint8_t>(storage::KlineFreq::kDay), range_start, range_end);
             for (size_t i = 0; i < rows.size(); ++i) {
                 w.begin_obj();
                 w.key("timestamp"); w.int_val(rows[i].timestamp / 1000); w.comma();
