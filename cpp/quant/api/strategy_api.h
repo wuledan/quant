@@ -46,6 +46,11 @@ private:
     ApiResponse backtest_history(uint64_t id);
     ApiResponse clone_strategy(uint64_t id);
 
+    ApiResponse handle_data(const std::string& method,
+                             const std::vector<std::string>& segments,
+                             const std::string& body);
+    ApiResponse handle_symbols();
+
     std::string entry_to_json(const strategy::StrategyEntry& entry);
     std::string result_to_json(const backtest::BacktestResult& result);
 

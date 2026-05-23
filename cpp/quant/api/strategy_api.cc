@@ -230,8 +230,23 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
     }
     if (!seg.empty()) segments.push_back(seg);
 
-    // Expect: ["api", "strategies", ...]
-    if (segments.size() < 2 || segments[0] != "api" || segments[1] != "strategies") {
+    // Expect: ["api", ...]
+    if (segments.size() < 2 || segments[0] != "api") {
+        return error_response(404, "Not found");
+    }
+
+    // ── Market data routes: /api/data/* ──
+    if (segments[1] == "data") {
+        return handle_data(method, segments, body);
+    }
+
+    // ── Symbols: /api/symbols ──
+    if (segments[1] == "symbols") {
+        return handle_symbols();
+    }
+
+    // ── Strategy routes: /api/strategies/* ──
+    if (segments[1] != "strategies") {
         return error_response(404, "Not found");
     }
 
@@ -726,6 +741,67 @@ std::string StrategyApi::result_to_json(const backtest::BacktestResult& result) 
 
     w.end_obj();
     return w.os.str();
+}
+
+// ── Market data handlers ──
+
+ApiResponse StrategyApi::handle_data(const std::string& method,
+                                      const std::vector<std::string>& segments,
+                                      const std::string& body) {
+    // GET /api/data/kline?symbol=&interval=&start=&end=
+    if (segments.size() >= 3 && segments[2] == "kline" && method == "GET") {
+        JsonWriter w;
+        w.begin_obj();
+        w.key("data"); w.begin_arr();
+        w.end_arr();
+        w.end_obj();
+        return success_response(w.os.str());
+    }
+    // GET /api/data/depth?symbol=
+    if (segments.size() >= 3 && segments[2] == "depth" && method == "GET") {
+        JsonWriter w;
+        w.begin_obj();
+        w.key("bids"); w.begin_arr(); w.end_arr(); w.comma();
+        w.key("asks"); w.begin_arr(); w.end_arr();
+        w.end_obj();
+        return success_response(w.os.str());
+    }
+    // GET /api/data/ticker?symbol=
+    if (segments.size() >= 3 && segments[2] == "ticker" && method == "GET") {
+        JsonWriter w;
+        w.begin_obj();
+        w.key("symbol"); w.str_val(""); w.comma();
+        w.key("price"); w.num_val(0); w.comma();
+        w.key("change"); w.num_val(0); w.comma();
+        w.key("volume"); w.int_val(0); w.comma();
+        w.key("timestamp"); w.int_val(0);
+        w.end_obj();
+        return success_response(w.os.str());
+    }
+    return error_response(404, "Not found");
+}
+
+ApiResponse StrategyApi::handle_symbols() {
+    JsonWriter w;
+    w.begin_obj();
+    w.key("symbols"); w.begin_arr();
+
+    // Return symbols loaded from CSV files (hardcoded for now)
+    const char* symbols[] = {"000001.SZ", "000002.SZ", "300750.SZ",
+                             "600519.SH", "000300.SH", "399001.SZ", "399006.SZ"};
+    for (size_t i = 0; i < sizeof(symbols) / sizeof(symbols[0]); ++i) {
+        w.begin_obj();
+        w.key("symbol"); w.str_val(symbols[i]); w.comma();
+        w.key("name"); w.str_val(symbols[i]); w.comma();
+        w.key("exchange"); w.str_val(
+            std::string(symbols[i]).find(".SH") != std::string::npos ? "SH" : "SZ");
+        w.end_obj();
+        if (i + 1 < sizeof(symbols) / sizeof(symbols[0])) w.comma();
+    }
+
+    w.end_arr();
+    w.end_obj();
+    return success_response(w.os.str());
 }
 
 }  // namespace quant::api
