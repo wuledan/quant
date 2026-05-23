@@ -296,7 +296,75 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         return handle_symbols();
     }
 
-    // ── Legacy /api/v1 routes ──
+    // ── Legacy routes + factor compute ──
+    // POST /api/factors/compute?symbol=600519.SH
+    if (segments[1] == "factors" && segments.size() >= 3 && segments[2] == "compute" && method == "POST") {
+        std::string sym;
+        for (size_t i = 0; i + 6 < query.size(); ) {
+            size_t eq = query.find('=', i), amp = query.find('&', eq);
+            if (eq == std::string::npos) break;
+            std::string key = query.substr(i, eq - i);
+            std::string val = query.substr(eq + 1, amp == std::string::npos ? query.size() - eq - 1 : amp - eq - 1);
+            if (key == "symbol") sym = val;
+            if (amp == std::string::npos) break;
+            i = amp + 1;
+        }
+        if (sym.empty()) return error_response(400, "Missing symbol");
+        auto rows = storage_.query_kline(sym, 7, 0, INT64_MAX);
+        if (rows.empty()) return error_response(404, "No data for symbol");
+
+        // Build input data vector
+        std::vector<double> close_prices, volumes;
+        for (auto& r : rows) {
+            close_prices.push_back(static_cast<double>(r.close_price) / 10000.0);
+            volumes.push_back(static_cast<double>(r.volume));
+        }
+
+        // Compute basic technical indicators
+        JsonWriter w;
+        w.begin_obj();
+        w.key("symbol"); w.str_val(sym); w.comma();
+        w.key("bars"); w.int_val(static_cast<int64_t>(rows.size())); w.comma();
+        w.key("factors"); w.begin_obj();
+
+        auto compute_ma = [&](int period) {
+            w.key("SMA_" + std::to_string(period)); w.begin_arr();
+            double sum = 0;
+            for (size_t i = 0; i < close_prices.size(); ++i) {
+                sum += close_prices[i];
+                if (i >= static_cast<size_t>(period)) sum -= close_prices[i - period];
+                w.num_val(i >= static_cast<size_t>(period - 1) ? sum / period : 0);
+                if (i + 1 < close_prices.size()) w.comma();
+            }
+            w.end_arr(); w.comma();
+        };
+
+        compute_ma(5);
+        compute_ma(10);
+        compute_ma(20);
+        compute_ma(60);
+
+        w.key("bars"); w.int_val(static_cast<int64_t>(rows.size()));
+        w.end_obj(); w.comma();
+        w.key("count"); w.int_val(static_cast<int64_t>(rows.size()));
+        w.end_obj();
+        return success_response(w.os.str());
+    }
+    // GET /api/factors/list
+    if (segments[1] == "factors" && segments.size() >= 3 && segments[2] == "list" && method == "GET") {
+        JsonWriter w;
+        w.begin_obj();
+        w.key("factors"); w.begin_arr();
+        const char* fnames[] = {"SMA_5","SMA_10","SMA_20","SMA_60","EMA_10","EMA_30","RSI_14"};
+        for (size_t i = 0; i < 7; ++i) {
+            w.str_val(fnames[i]);
+            if (i < 6) w.comma();
+        }
+        w.end_arr();
+        w.end_obj();
+        return success_response(w.os.str());
+    }
+
     // GET /api/strategy/list
     if (segments[1] == "strategy" && segments.size() >= 3 && segments[2] == "list") {
         return list_strategies();
