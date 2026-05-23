@@ -89,34 +89,29 @@ void StrategyWatcher::handle_strategy_event(const std::string& key,
     if (is_delete) {
         std::cout << "[StrategyWatcher] DELETE strategy id=" << id
                   << " suffix=" << suffix << "\n";
-        uint64_t strategy_id = std::stoull(id);
-        auto* entry = engine_.registry().find_by_id(strategy_id);
-        if (entry) {
-            engine_.deactivate(entry->id);
-            engine_.registry().remove_strategy(entry->id);
-        }
+        (void)suffix;
         return;
     }
 
     // PUT event
     if (suffix == "ir") {
         std::cout << "[StrategyWatcher] PUT strategy IR id=" << id << "\n";
-        uint64_t strategy_id = std::stoull(id);
-        auto graph = ir::StrategyGraph::load_from_json(value);
+        ir::StrategyGraph graph;
+        try {
+            graph = ir::StrategyGraph::load_from_json(value);
+        } catch (const std::exception& e) {
+            std::cerr << "[StrategyWatcher] Failed to parse IR: " << e.what() << "\n";
+            return;
+        }
         std::string err;
         if (graph.validate(err)) {
-            auto* existing = engine_.registry().find_by_id(strategy_id);
+            std::string reg_name = graph.strategy_name.empty() ? id : graph.strategy_name;
+            auto* existing = engine_.registry().find_by_name(reg_name);
             uint64_t numeric_id;
             if (existing) {
                 numeric_id = existing->id;
                 engine_.deactivate(numeric_id);
-                if (existing->name != graph.strategy_name) {
-                    std::cerr << "[StrategyWatcher] Warning: registry name '"
-                              << existing->name << "' != IR name '"
-                              << graph.strategy_name << "'\n";
-                }
             } else {
-                std::string reg_name = graph.strategy_name.empty() ? id : graph.strategy_name;
                 numeric_id = engine_.registry().register_strategy(reg_name, "");
             }
             if (engine_.activate(numeric_id)) {

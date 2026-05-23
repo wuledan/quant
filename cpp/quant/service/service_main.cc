@@ -126,8 +126,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "[Service] WARNING: etcd is not available at "
                   << "http://127.0.0.1:2379 — strategy/backtest config will not sync\n";
     }
-    std::move(strategy_watcher.start()).scheduleOn(global_exec.executor()).start();
-    std::cout << "[Service] StrategyWatcher started (etcd endpoint=http://127.0.0.1:2379)\n";
+    // StrategyWatcher disabled — etcdctl get_prefix can't handle multi-line
+    // IR JSON values. Strategies are registered via REST API instead.
+    std::cout << "[Service] StrategyWatcher disabled (use REST API)\n";
 
     // ── 5. Create SchedulerService and start it ──
     scheduler::SchedulerService scheduler_service;
