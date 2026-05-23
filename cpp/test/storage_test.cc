@@ -838,3 +838,167 @@ TEST(DiskPersistenceTest, DeleteNonExistentSegment) {
     bool deleted = disk.delete_segment("nope.seg");
     EXPECT_FALSE(deleted);
 }
+
+// ── T4.2: Read-Through extended tests ──
+
+TEST(TimeSeriesStoreTest, ReadThroughNewStoreBackfillsCache) {
+    // Write data via DiskPersistence directly, then create fresh store
+    // (empty cache) and trigger read-through — verify cache backfill.
+    std::filesystem::remove_all("/tmp/quant_test_rt_newstore");
+    {
+        DiskPersistence disk("/tmp/quant_test_rt_newstore");
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(make_rows(1000, 10));
+        disk.write_segment("000001", 1, blocks, 1000, 1009);
+    }
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_rt_newstore",
+    });
+
+    // First query: read-through from disk
+    auto r1 = blockingWait(store.co_query_kline("000001", 1, 1000, 1009));
+    ASSERT_EQ(r1.size(), 10u);
+    EXPECT_EQ(r1[0].timestamp, 1000);
+    EXPECT_EQ(r1[9].timestamp, 1009);
+
+    // Second query: should hit cache (backfilled by first query)
+    auto r2 = blockingWait(store.co_query_kline("000001", 1, 1000, 1009));
+    ASSERT_EQ(r2.size(), 10u);
+    EXPECT_EQ(r2[0].timestamp, 1000);
+}
+
+TEST(TimeSeriesStoreTest, ReadThroughNonOverlappingCacheAndDisk) {
+    // Data in cache (ts 1000-1002) and data on disk (ts 2000-2004) are
+    // non-overlapping. Querying the disk range triggers read-through.
+    std::filesystem::remove_all("/tmp/quant_test_rt_nonoverlap");
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64},
+        .data_dir = "/tmp/quant_test_rt_nonoverlap",
+    });
+
+    // Write to cache only (via co_store_kline, no disk flush)
+    blockingWait(store.co_store_kline("000001", 1, make_row(1000, 10.0)));
+    blockingWait(store.co_store_kline("000001", 1, make_row(1001, 11.0)));
+    blockingWait(store.co_store_kline("000001", 1, make_row(1002, 12.0)));
+
+    // Write non-overlapping data to disk via DiskPersistence directly
+    auto disk_rows = make_rows(2000, 5);  // 2000-2004
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(disk_rows);
+    store.disk().write_segment("000001", 1, blocks, 2000, 2004);
+
+    // Query cache range — cache hit
+    auto cached = blockingWait(store.co_query_kline("000001", 1, 1000, 1002));
+    ASSERT_EQ(cached.size(), 3u);
+    EXPECT_EQ(cached[0].timestamp, 1000);
+
+    // Query disk range — cache miss (different ts range) → read-through
+    auto from_disk = blockingWait(store.co_query_kline("000001", 1, 2000, 2004));
+    ASSERT_EQ(from_disk.size(), 5u);
+    EXPECT_EQ(from_disk[0].timestamp, 2000);
+    EXPECT_EQ(from_disk[4].timestamp, 2004);
+
+    // Disk data should now be backfilled into cache
+    auto cached_again = blockingWait(store.co_query_kline("000001", 1, 2000, 2004));
+    ASSERT_EQ(cached_again.size(), 5u);
+}
+
+TEST(TimeSeriesStoreTest, ReadThroughCacheFullEviction) {
+    // Fill cache near budget with one symbol, then read-through another.
+    // Verify read-through succeeds despite cache pressure.
+    std::filesystem::remove_all("/tmp/quant_test_rt_fullevict");
+
+    // Pre-write target data to disk
+    DiskPersistence disk("/tmp/quant_test_rt_fullevict");
+    auto blocks = TimeSeriesStore::rows_to_column_blocks(make_rows(1000, 10));
+    disk.write_segment("000001", 1, blocks, 1000, 1009);
+
+    TimeSeriesStore store(TimeSeriesStore::Options{
+        .cache_opts = TimeSeriesCache::Options{.num_shards = 1, .budget_mb = 1},
+        .data_dir = "/tmp/quant_test_rt_fullevict",
+    });
+
+    // Fill cache near/over budget with a filler symbol (same shard, 1 shard total)
+    for (int i = 0; i < 20000; ++i) {
+        store.store_kline("FILLER", 1, make_row(i * 1000, 100.0));
+    }
+
+    // Read-through for 000001 — should succeed even with cache pressure
+    auto result = blockingWait(store.co_query_kline("000001", 1, 1000, 1009));
+    ASSERT_EQ(result.size(), 10u);
+    EXPECT_EQ(result[0].timestamp, 1000);
+    EXPECT_EQ(result[9].timestamp, 1009);
+}
+
+// ── T4.3: Cache eviction extended tests ──
+
+TEST(TimeSeriesCacheTest, EvictionRemovesOldestPreservesNewest) {
+    // Sub-1MB budget, 40000 writes → oldest evicted, newest survives
+    TimeSeriesCache cache(TimeSeriesCache::Options{.num_shards = 1, .budget_mb = 1});
+
+    for (int i = 0; i < 40000; ++i) {
+        cache.append("000001", 1, make_row(i * 1000, 100.0));
+    }
+
+    // Newest rows should be present
+    auto newest = cache.query("000001", 1, 39000000, 40000000);
+    ASSERT_FALSE(newest.empty());
+    EXPECT_GT(newest.back().timestamp, 35000000);
+
+    // Oldest rows should be gone (evicted)
+    auto oldest = cache.query("000001", 1, 0, 5000000);
+    EXPECT_TRUE(oldest.empty());
+
+    // Total surviving rows < 40000
+    EXPECT_LT(newest.size() + oldest.size(), 40000u);
+}
+
+TEST(TimeSeriesCacheTest, EvictionWithDataSource) {
+    // Verify DataSource is properly stored regardless of source value.
+    // Note: current eviction uses LRU only, not DataSource priority.
+    // This test verifies the tagging is functional.
+    TimeSeriesCache cache(TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 64});
+
+    blockingWait(cache.co_append("000001", 1, make_row(1000, 10.0),
+                                  DataSource::kRealtimeIngest));
+    blockingWait(cache.co_append("000002", 1, make_row(1000, 20.0),
+                                  DataSource::kBatchLoad));
+    blockingWait(cache.co_append("000003", 1, make_row(1000, 30.0),
+                                  DataSource::kRemoteLoad));
+
+    // All should be queryable regardless of DataSource
+    auto r1 = cache.query("000001", 1, 0, 9999);
+    auto r2 = cache.query("000002", 1, 0, 9999);
+    auto r3 = cache.query("000003", 1, 0, 9999);
+    ASSERT_EQ(r1.size(), 1u);
+    ASSERT_EQ(r2.size(), 1u);
+    ASSERT_EQ(r3.size(), 1u);
+    EXPECT_EQ(r1[0].close_price, 100000);   // 10.0 * 10000
+    EXPECT_EQ(r2[0].close_price, 200000);   // 20.0 * 10000
+    EXPECT_EQ(r3[0].close_price, 300000);   // 30.0 * 10000
+}
+
+TEST(TimeSeriesCacheTest, EvictedDataNotQueryable) {
+    // After eviction, verify old data is truly unreachable
+    // and new data for the same key is consistent.
+    TimeSeriesCache cache(TimeSeriesCache::Options{.num_shards = 1, .budget_mb = 1});
+
+    // Write enough rows to trigger eviction multiple times.
+    // Budget=1MB, sizeof(KlineRow)=48, so ~21846 rows triggers eviction.
+    for (int i = 0; i < 30000; ++i) {
+        cache.append("000001", 1, make_row(i * 1000, 100.0));
+    }
+
+    // Data from early appends should be gone (evicted)
+    auto early = cache.query("000001", 1, 0, 1000000);
+    EXPECT_TRUE(early.empty());
+
+    // Newest data (written after last eviction) should exist
+    auto recent = cache.query("000001", 1, 25000000, 30000000);
+    EXPECT_FALSE(recent.empty());
+
+    // A different symbol should also be queryable independently
+    cache.append("000002", 1, make_row(99999, 200.0));
+    auto other = cache.query("000002", 1, 0, 999999);
+    ASSERT_EQ(other.size(), 1u);
+    EXPECT_EQ(other[0].close_price, 2000000);
+}

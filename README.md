@@ -11,7 +11,7 @@
 - **WorkStealingExecutor**: 工作窃取调度器，每 worker 线程维护本地双端队列（ChaseLevDeque），协程唤醒时路由到原始线程保持 CPU 缓存局部性
 - **AffinityBaton / AffinityMutex / AffinitySharedMutex**: 自研协程友好同步原语，单原子状态字 + 侵入式等待者链表，唤醒经 `add_to_worker()` 保持线程亲和
 
-> `folly::coro::Mutex`/`SharedMutex` 不满足线程亲和要求（唤醒不经过 executor 路由，SharedMutex 内部含 SpinLock），故自研 Affinity 系列原语。未来规划全用户态化（SPDK 本地盘 IO、DPDK/RDMA 网络 IO），构建完整 RTC (Run-To-Complete) 在线任务模型。
+> `folly::coro::Mutex`/`SharedMutex` 不满足线程亲和要求（唤醒不经过 executor 路由，SharedMutex 内部含 SpinLock），故自研 Affinity 系列原语，完整实现了协程同步原语。未来规划全用户态化（SPDK 本地盘 IO、DPDK/RDMA 网络 IO），构建完整 RTC (Run-To-Complete) 在线任务模型。
 
 ### Python DSL → IR 编译 → C++ 图执行
 
