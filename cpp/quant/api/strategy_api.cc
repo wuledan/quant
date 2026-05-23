@@ -862,8 +862,9 @@ ApiResponse StrategyApi::handle_symbols() {
     w.begin_arr();
 
     const char* syms[] = {"000001.SZ", "000002.SZ", "300750.SZ",
-                          "600519.SH", "000300.SH", "399001.SZ", "399006.SZ"};
-    size_t n = sizeof(syms) / sizeof(syms[0]);
+                          "600519.SH", "000001.SH", "000300.SH",
+                          "399001.SZ", "399006.SZ"};
+    static const size_t n = sizeof(syms) / sizeof(syms[0]);
     for (size_t i = 0; i < n; ++i) {
         w.begin_obj();
         w.key("symbol"); w.str_val(syms[i]); w.comma();
