@@ -17,6 +17,7 @@
 
 #include "cpp/quant/event/events/kline_event.h"
 #include "cpp/quant/network/co_io.h"
+#include "cpp/quant/network/global_io.h"
 
 namespace quant::storage {
 
@@ -25,6 +26,8 @@ DiskPersistence::DiskPersistence(std::filesystem::path data_dir, SyncMode sync_m
     if (!std::filesystem::exists(data_dir_)) {
         std::filesystem::create_directories(data_dir_);
     }
+    // Wire up io_uring from GlobalCoIouring if available
+    ring_ = quant::network::GlobalCoIouring::instance().io_uring();
     // Build in-memory index from existing .seg files at startup
     index_.build(data_dir_.string());
 }
@@ -46,8 +49,8 @@ std::string DiskPersistence::write_segment(
     std::string fname = segment_filename(symbol, data_type, begin_ts);
     std::filesystem::path fpath = data_dir_ / fname;
 
-    std::ofstream ofs(fpath, std::ios::binary | std::ios::trunc);
-    if (!ofs) {
+    int fd = ::open(fpath.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
         throw std::runtime_error("Cannot open segment file for writing: "
                                  + fpath.string());
     }
@@ -62,7 +65,11 @@ std::string DiskPersistence::write_segment(
     header.num_blocks = static_cast<uint32_t>(blocks.size());
     header.segment_begin_ts = begin_ts;
     header.segment_end_ts = end_ts;
-    ofs.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    ssize_t written = ::pwrite(fd, &header, sizeof(header), 0);
+    if (written < 0 || static_cast<size_t>(written) != sizeof(header)) {
+        ::close(fd);
+        throw std::runtime_error("Write failed for segment header: " + fpath.string());
+    }
 
     // 2. Write block index (with placeholder offsets)
     std::vector<BlockIndexEntry> index(blocks.size());
@@ -78,26 +85,31 @@ std::string DiskPersistence::write_segment(
         index[i].max_ts = blocks[i].max_timestamp();
         data_offset += blocks[i].compressed_size();
     }
-    ofs.write(reinterpret_cast<const char*>(index.data()),
-              index.size() * sizeof(BlockIndexEntry));
+    off_t offset = sizeof(header);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    written = ::pwrite(fd, index.data(), index_bytes, offset);
+    if (written < 0 || static_cast<size_t>(written) != index_bytes) {
+        ::close(fd);
+        throw std::runtime_error("Write failed for segment index: " + fpath.string());
+    }
 
     // 3. Write compressed block data
+    offset += index_bytes;
     for (const auto& block : blocks) {
         const auto& data = block.data();
-        ofs.write(reinterpret_cast<const char*>(data.data()),
-                  data.size());
+        written = ::pwrite(fd, data.data(), data.size(), offset);
+        if (written < 0 || static_cast<size_t>(written) != data.size()) {
+            ::close(fd);
+            throw std::runtime_error("Write failed for segment block: " + fpath.string());
+        }
+        offset += data.size();
     }
-
-    ofs.close();
 
     if (sync_mode_ == SyncMode::kSync) {
-        // Open with POSIX fd for fsync
-        int fd = ::open(fpath.c_str(), O_RDONLY);
-        if (fd >= 0) {
-            do_fsync(fd);
-            ::close(fd);
-        }
+        do_fsync(fd);
     }
+
+    ::close(fd);
 
     // Update in-memory index with the new segment's block metadata
     index_.add_segment(data_dir_.string(), fname);
@@ -108,32 +120,42 @@ std::string DiskPersistence::write_segment(
 std::vector<ColumnBlock> DiskPersistence::read_segment(
     std::string_view filename) const {
     std::filesystem::path fpath = data_dir_ / filename;
-    std::ifstream ifs(fpath, std::ios::binary);
-    if (!ifs) return {};
 
-    // Read header
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd < 0) return {};
+
     SegmentHeader header;
-    ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!ifs || header.magic != kSegmentMagic) return {};
+    ssize_t n = ::pread(fd, &header, sizeof(header), 0);
+    if (n < 0 || static_cast<size_t>(n) != sizeof(header) || header.magic != kSegmentMagic) {
+        ::close(fd);
+        return {};
+    }
 
-    // Read index
     std::vector<BlockIndexEntry> index(header.num_blocks);
-    ifs.read(reinterpret_cast<char*>(index.data()),
-             index.size() * sizeof(BlockIndexEntry));
+    off_t offset = sizeof(SegmentHeader);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    n = ::pread(fd, index.data(), index_bytes, offset);
+    if (n < 0 || static_cast<size_t>(n) != index_bytes) {
+        ::close(fd);
+        return {};
+    }
 
-    // Read each block
+    offset += index_bytes;
     std::vector<ColumnBlock> result;
     result.reserve(index.size());
     for (const auto& entry : index) {
         std::vector<uint8_t> comp_data(entry.compressed_size);
-        ifs.seekg(static_cast<std::streamoff>(entry.offset));
-        ifs.read(reinterpret_cast<char*>(comp_data.data()), comp_data.size());
-
+        n = ::pread(fd, comp_data.data(), comp_data.size(), entry.offset);
+        if (n < 0 || static_cast<size_t>(n) != comp_data.size()) {
+            ::close(fd);
+            return {};
+        }
         result.emplace_back(entry.field, entry.codec,
                             entry.row_count, std::move(comp_data),
                             entry.min_ts, entry.max_ts);
     }
 
+    ::close(fd);
     return result;
 }
 
@@ -141,22 +163,32 @@ std::vector<ColumnBlock> DiskPersistence::read_segment_filtered(
     std::string_view filename, DataField field,
     int64_t range_begin, int64_t range_end) const {
     std::filesystem::path fpath = data_dir_ / filename;
-    std::ifstream ifs(fpath, std::ios::binary);
-    if (!ifs) return {};
+
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd < 0) return {};
 
     SegmentHeader header;
-    ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!ifs || header.magic != kSegmentMagic) return {};
+    ssize_t n = ::pread(fd, &header, sizeof(header), 0);
+    if (n < 0 || static_cast<size_t>(n) != sizeof(header) || header.magic != kSegmentMagic) {
+        ::close(fd);
+        return {};
+    }
 
     // Quick range check
     if (header.segment_end_ts < range_begin ||
         header.segment_begin_ts > range_end) {
+        ::close(fd);
         return {};
     }
 
     std::vector<BlockIndexEntry> index(header.num_blocks);
-    ifs.read(reinterpret_cast<char*>(index.data()),
-             index.size() * sizeof(BlockIndexEntry));
+    off_t offset = sizeof(SegmentHeader);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    n = ::pread(fd, index.data(), index_bytes, offset);
+    if (n < 0 || static_cast<size_t>(n) != index_bytes) {
+        ::close(fd);
+        return {};
+    }
 
     std::vector<ColumnBlock> result;
     for (const auto& entry : index) {
@@ -165,14 +197,17 @@ std::vector<ColumnBlock> DiskPersistence::read_segment_filtered(
         if (entry.max_ts < range_begin || entry.min_ts > range_end) continue;
 
         std::vector<uint8_t> comp_data(entry.compressed_size);
-        ifs.seekg(static_cast<std::streamoff>(entry.offset));
-        ifs.read(reinterpret_cast<char*>(comp_data.data()), comp_data.size());
-
+        n = ::pread(fd, comp_data.data(), comp_data.size(), entry.offset);
+        if (n < 0 || static_cast<size_t>(n) != comp_data.size()) {
+            ::close(fd);
+            return {};
+        }
         result.emplace_back(entry.field, entry.codec,
                             entry.row_count, std::move(comp_data),
                             entry.min_ts, entry.max_ts);
     }
 
+    ::close(fd);
     return result;
 }
 
@@ -200,14 +235,15 @@ bool DiskPersistence::delete_segment(std::string_view filename) {
     std::filesystem::path fpath = data_dir_ / filename;
 
     // Read header to get symbol+data_type for index removal
-    std::ifstream ifs(fpath, std::ios::binary);
-    if (ifs) {
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd >= 0) {
         SegmentHeader header;
-        ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (header.magic == kSegmentMagic) {
+        ssize_t n = ::pread(fd, &header, sizeof(header), 0);
+        if (n > 0 && static_cast<size_t>(n) == sizeof(header) && header.magic == kSegmentMagic) {
             std::string symbol(header.symbol, header.symbol_len);
             index_.remove_file(symbol, header.data_type, filename);
         }
+        ::close(fd);
     }
 
     return std::filesystem::remove(fpath);
@@ -229,12 +265,15 @@ ColumnBlock DiskPersistence::read_block_at(
     int64_t min_ts,
     int64_t max_ts) const {
     std::filesystem::path fpath = data_dir_ / filename;
-    std::ifstream ifs(fpath, std::ios::binary);
-    if (!ifs) return {};
+
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd < 0) return {};
 
     std::vector<uint8_t> comp_data(compressed_size);
-    ifs.seekg(static_cast<std::streamoff>(offset));
-    ifs.read(reinterpret_cast<char*>(comp_data.data()), comp_data.size());
+    ssize_t n = ::pread(fd, comp_data.data(), comp_data.size(), offset);
+    ::close(fd);
+
+    if (n < 0 || static_cast<size_t>(n) != compressed_size) return {};
 
     return ColumnBlock(field, codec, row_count, std::move(comp_data), min_ts, max_ts);
 }
@@ -405,6 +444,70 @@ CoTask<std::vector<ColumnBlock>> DiskPersistence::co_read_segment(
                             entry.row_count, std::move(comp_data),
                             entry.min_ts, entry.max_ts);
         offset += comp_data.size();
+    }
+
+    ::close(fd);
+    co_return result;
+}
+
+CoTask<std::vector<ColumnBlock>> DiskPersistence::co_read_segment_filtered(
+    std::string_view filename, DataField field,
+    int64_t range_begin, int64_t range_end) const {
+    // Fall back to sync path when io_uring is not available
+    if (ring_ == nullptr) {
+        co_return read_segment_filtered(filename, field, range_begin, range_end);
+    }
+
+    std::filesystem::path fpath = data_dir_ / filename;
+
+    int fd = ::open(fpath.c_str(), O_RDONLY);
+    if (fd < 0) co_return std::vector<ColumnBlock>{};
+
+    // 1. Read header via io_uring
+    SegmentHeader header;
+    ssize_t n = co_await ring_->co_read(fd, &header, sizeof(header), 0);
+    if (n < 0 || static_cast<size_t>(n) != sizeof(header)) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+    if (header.magic != kSegmentMagic) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+
+    // Quick range check at segment level
+    if (header.segment_end_ts < range_begin ||
+        header.segment_begin_ts > range_end) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+
+    // 2. Read block index via io_uring
+    std::vector<BlockIndexEntry> index(header.num_blocks);
+    off_t offset = sizeof(SegmentHeader);
+    size_t index_bytes = index.size() * sizeof(BlockIndexEntry);
+    n = co_await ring_->co_read(fd, index.data(), index_bytes, offset);
+    if (n < 0 || static_cast<size_t>(n) != index_bytes) {
+        ::close(fd);
+        co_return std::vector<ColumnBlock>{};
+    }
+
+    // 3. Read and filter blocks
+    std::vector<ColumnBlock> result;
+    for (const auto& entry : index) {
+        // Filter by field and time range
+        if (entry.field != field) continue;
+        if (entry.max_ts < range_begin || entry.min_ts > range_end) continue;
+
+        std::vector<uint8_t> comp_data(entry.compressed_size);
+        n = co_await ring_->co_read(fd, comp_data.data(), comp_data.size(), entry.offset);
+        if (n < 0 || static_cast<size_t>(n) != comp_data.size()) {
+            ::close(fd);
+            co_return std::vector<ColumnBlock>{};
+        }
+        result.emplace_back(entry.field, entry.codec,
+                            entry.row_count, std::move(comp_data),
+                            entry.min_ts, entry.max_ts);
     }
 
     ::close(fd);

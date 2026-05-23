@@ -4,7 +4,6 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -136,6 +135,9 @@ public:
         int64_t begin_ts, int64_t end_ts);
     CoTask<std::vector<ColumnBlock>> co_read_segment(
         std::string_view filename) const;
+    CoTask<std::vector<ColumnBlock>> co_read_segment_filtered(
+        std::string_view filename, DataField field,
+        int64_t range_begin, int64_t range_end) const;
 
 private:
     static void do_fsync(int fd);

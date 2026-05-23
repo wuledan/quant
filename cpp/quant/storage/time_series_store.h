@@ -10,6 +10,7 @@
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/disk_persistence.h"
+#include "cpp/quant/storage/remote_storage.h"
 #include "cpp/quant/storage/time_series_cache.h"
 
 namespace quant::storage {
@@ -60,6 +61,10 @@ public:
     TimeSeriesCache& cache() noexcept { return *cache_; }
     DiskPersistence& disk() noexcept { return *disk_; }
 
+    // ── Remote read-through ──
+    void set_remote_storage(RemoteStorage* rs) noexcept { remote_storage_ = rs; }
+    RemoteStorage* remote_storage() const noexcept { return remote_storage_; }
+
     StoreStatus flush();
     StoreStatus close();
 
@@ -87,6 +92,7 @@ private:
     Options opts_;
     std::unique_ptr<TimeSeriesCache> cache_;
     std::unique_ptr<DiskPersistence> disk_;
+    RemoteStorage* remote_storage_{nullptr};
     std::unordered_map<std::string, PendingDisk> pending_disk_;
     bool closed_ = false;
 };

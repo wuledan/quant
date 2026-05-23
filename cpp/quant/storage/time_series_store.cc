@@ -239,6 +239,49 @@ CoTask<std::vector<KlineRow>> TimeSeriesStore::co_query_kline(
     // 2. Cache miss: query SegmentIndex for matching disk segments
     auto metas = co_await disk_->index().co_query(symbol, data_type,
         DataField::kClose, start_ts, end_ts);
+
+    // 2a. Remote read-through: when disk has no data and a remote
+    //     storage is configured, download from S3, persist locally,
+    //     backfill cache, and return the range slice.
+    if (metas.empty() && remote_storage_) {
+        int start_year = RemoteStorage::year_from_timestamp(start_ts);
+        int end_year = RemoteStorage::year_from_timestamp(end_ts);
+
+        std::map<int64_t, KlineRow> merged;
+        for (int year = start_year; year <= end_year; ++year) {
+            if (!remote_storage_->exists(symbol, data_type, year)) continue;
+
+            auto rows = remote_storage_->download_kline(symbol, data_type, year);
+            if (rows.empty()) continue;
+
+            // Persist to local disk so subsequent queries hit disk
+            auto blocks = rows_to_column_blocks(rows);
+            int64_t min_ts = rows.front().timestamp;
+            int64_t max_ts = rows.back().timestamp;
+            co_await disk_->co_write_segment(
+                symbol, data_type, blocks, min_ts, max_ts);
+
+            // Backfill cache with remote-source priority
+            co_await cache_->co_append_batch(
+                symbol, data_type, rows, DataSource::kRemoteLoad);
+
+            for (auto& row : rows) {
+                merged[row.timestamp] = std::move(row);
+            }
+        }
+
+        if (!merged.empty()) {
+            std::vector<KlineRow> result;
+            auto lo = merged.lower_bound(start_ts);
+            auto hi = merged.upper_bound(end_ts);
+            for (auto it = lo; it != hi; ++it) {
+                result.push_back(it->second);
+            }
+            co_return result;
+        }
+        co_return {};
+    }
+
     if (metas.empty()) co_return {};
 
     // 3. Collect unique segment filenames (each segment has multiple field entries)

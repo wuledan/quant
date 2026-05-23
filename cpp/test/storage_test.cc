@@ -1,4 +1,8 @@
 // storage_test.cc — Tests for ColumnBlock, TimeSeriesCache, StorageEngine, WriteAheadLog, WriteBuffer
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
 #include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/storage/time_series_cache.h"
@@ -10,8 +14,6 @@
 #include "cpp/quant/infra/coroutine.h"
 
 #include <gtest/gtest.h>
-#include <filesystem>
-#include <vector>
 
 using namespace quant::storage;
 using quant::infra::blockingWait;
@@ -1145,4 +1147,104 @@ TEST(DataInitTest, LoadCsvWithFreqColumn) {
 
     engine.shutdown();
     std::filesystem::remove_all("/tmp/quant_test_init_freqcol");
+}
+
+// ── T5.8: DiskPersistence async I/O tests ──
+
+TEST(DiskPersistenceTest, ReadSegmentFiltered) {
+    std::filesystem::remove_all("/tmp/quant_test_filtered");
+    {
+        DiskPersistence disk("/tmp/quant_test_filtered");
+        auto rows = make_rows(1000, 10);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 1000, 1009);
+
+        auto result = disk.read_segment_filtered(
+            disk.list_segments("000001", 1)[0],
+            DataField::kClose, 1002, 1005);
+
+        ASSERT_FALSE(result.empty());
+        EXPECT_EQ(result.size(), 1u);
+        EXPECT_EQ(result[0].field(), DataField::kClose);
+        EXPECT_EQ(result[0].row_count(), 10u);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_filtered");
+}
+
+TEST(DiskPersistenceTest, ReadSegmentFilteredRangeExcludes) {
+    std::filesystem::remove_all("/tmp/quant_test_filtered_excl");
+    {
+        DiskPersistence disk("/tmp/quant_test_filtered_excl");
+        auto rows = make_rows(1000, 10);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 1000, 1009);
+
+        auto result = disk.read_segment_filtered(
+            disk.list_segments("000001", 1)[0],
+            DataField::kClose, 5000, 6000);
+        EXPECT_TRUE(result.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_filtered_excl");
+}
+
+TEST(DiskPersistenceTest, ReadSegmentFilteredFieldMismatch) {
+    std::filesystem::remove_all("/tmp/quant_test_filtered_field");
+    {
+        DiskPersistence disk("/tmp/quant_test_filtered_field");
+        auto rows = make_rows(1000, 10);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 1000, 1009);
+
+        auto result = disk.read_segment_filtered(
+            disk.list_segments("000001", 1)[0],
+            static_cast<DataField>(99), 0, INT64_MAX);
+        EXPECT_TRUE(result.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_filtered_field");
+}
+
+TEST(DiskPersistenceTest, CoReadSegmentFilteredFallback) {
+    std::filesystem::remove_all("/tmp/quant_test_co_filtered");
+    {
+        DiskPersistence disk("/tmp/quant_test_co_filtered");
+        auto rows = make_rows(2000, 5);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+        disk.write_segment("000001", 1, blocks, 2000, 2004);
+
+        auto segments = disk.list_segments("000001", 1);
+        ASSERT_EQ(segments.size(), 1u);
+
+        auto result = blockingWait(disk.co_read_segment_filtered(
+            segments[0], DataField::kOpen, 2001, 2003));
+        ASSERT_FALSE(result.empty());
+        EXPECT_EQ(result[0].field(), DataField::kOpen);
+        EXPECT_EQ(result[0].row_count(), 5u);
+
+        auto empty_result = blockingWait(disk.co_read_segment_filtered(
+            segments[0], DataField::kOpen, 9999, 99999));
+        EXPECT_TRUE(empty_result.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_co_filtered");
+}
+
+TEST(DiskPersistenceTest, CoWriteAndReadFallback) {
+    std::filesystem::remove_all("/tmp/quant_test_co_fallback");
+    {
+        DiskPersistence disk("/tmp/quant_test_co_fallback");
+        auto rows = make_rows(100, 5);
+        auto blocks = TimeSeriesStore::rows_to_column_blocks(rows);
+
+        auto fname = blockingWait(disk.co_write_segment(
+            "000001", 1, blocks, 100, 104));
+        EXPECT_FALSE(fname.empty());
+
+        auto read_back = blockingWait(disk.co_read_segment(fname));
+        ASSERT_EQ(read_back.size(), 8u);
+
+        std::vector<int64_t> ts_out(5);
+        read_back[0].decompress(std::span<int64_t>(ts_out));
+        EXPECT_EQ(ts_out[0], 100);
+        EXPECT_EQ(ts_out[4], 104);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_co_fallback");
 }

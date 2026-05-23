@@ -182,6 +182,7 @@ add_library(quant_storage
     cpp/quant/storage/data_initializer.cc
     cpp/quant/storage/write_ahead_log.cc
     cpp/quant/storage/write_buffer.cc
+    cpp/quant/storage/remote_storage.cc
 )
 target_include_directories(quant_storage PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_storage PUBLIC quant_event quant_network)
