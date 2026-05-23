@@ -255,7 +255,7 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         auto rows = storage_.query_kline(segments[3], 7, 0, INT64_MAX);
         for (size_t i = 0; i < rows.size(); ++i) {
             w.begin_obj();
-            w.key("timestamp"); w.int_val(rows[i].timestamp); w.comma();
+            w.key("timestamp"); w.int_val(rows[i].timestamp / 1000); w.comma();
             w.key("open"); w.num_val(static_cast<double>(rows[i].open_price) / 10000.0); w.comma();
             w.key("high"); w.num_val(static_cast<double>(rows[i].high_price) / 10000.0); w.comma();
             w.key("low"); w.num_val(static_cast<double>(rows[i].low_price) / 10000.0); w.comma();
@@ -829,7 +829,7 @@ ApiResponse StrategyApi::handle_data(const std::string& method,
             auto rows = storage_.query_kline(symbol, static_cast<uint8_t>(storage::KlineFreq::kDay), 0, INT64_MAX);
             for (size_t i = 0; i < rows.size(); ++i) {
                 w.begin_obj();
-                w.key("timestamp"); w.int_val(rows[i].timestamp); w.comma();
+                w.key("timestamp"); w.int_val(rows[i].timestamp / 1000); w.comma();
                 w.key("open"); w.num_val(static_cast<double>(rows[i].open_price) / 10000.0); w.comma();
                 w.key("high"); w.num_val(static_cast<double>(rows[i].high_price) / 10000.0); w.comma();
                 w.key("low"); w.num_val(static_cast<double>(rows[i].low_price) / 10000.0); w.comma();
