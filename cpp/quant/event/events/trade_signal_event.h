@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 
 #include "cpp/quant/event/event.h"
 
@@ -22,6 +23,9 @@ public:
     OrderSide   side;
     double      target_weight;   // target position weight [0.0, 1.0]
     double      confidence;      // signal confidence [0.0, 1.0]
+    double      price{0.0};      // signal price
+    int         quantity{0};     // suggested trade quantity
+    std::unordered_map<std::string, double> factor_values; // factor snapshots
 };
 
 }  // namespace quant::event

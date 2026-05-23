@@ -228,15 +228,49 @@ std::string WsEventBridge::serialize_risk(const event::Event& event) {
 std::string WsEventBridge::serialize_signal(const event::Event& event) {
     auto& sig_evt = static_cast<const event::TradeSignalEvent&>(event);
 
-    char buf[512];
-    std::snprintf(buf, sizeof(buf),
-        R"({"strategy_id":"%s","symbol":"%s","side":%u,"target_weight":%.4f,"confidence":%.4f})",
-        sig_evt.strategy_id.c_str(),
+    // Convert side: 0=kBuy → 1, 1=kSell → -1
+    int side_val = (sig_evt.side == event::OrderSide::kBuy) ? 1 : -1;
+
+    // Build factors JSON object
+    std::string factors_json = "{";
+    size_t fi = 0;
+    for (const auto& [k, v] : sig_evt.factor_values) {
+        if (fi > 0) factors_json += ",";
+        factors_json += "\"" + k + "\":";
+        char val_buf[32];
+        std::snprintf(val_buf, sizeof(val_buf), "%.4f", v);
+        factors_json += val_buf;
+        ++fi;
+    }
+    factors_json += "}";
+
+    // Buffer: approximate capacity
+    char buf[1024];
+    int n = std::snprintf(buf, sizeof(buf),
+        R"({"strategy_id":%lld,"symbol":"%s","side":%d,"quantity":%d,)"
+        R"("price":%.2f,"confidence":%.4f,"factors":%s,"timestamp":%lld})",
+        static_cast<long long>(std::stoll(sig_evt.strategy_id)),
         sig_evt.symbol.c_str(),
-        static_cast<unsigned>(sig_evt.side),
-        sig_evt.target_weight,
-        sig_evt.confidence);
-    return buf;
+        side_val,
+        sig_evt.quantity,
+        sig_evt.price,
+        sig_evt.confidence,
+        factors_json.c_str(),
+        static_cast<long long>(sig_evt.timestamp_us()));
+    if (n < 0 || static_cast<size_t>(n) >= sizeof(buf)) {
+        // Fallback: minimal serialization without factors
+        std::snprintf(buf, sizeof(buf),
+            R"({"strategy_id":%lld,"symbol":"%s","side":%d,"quantity":%d,)"
+            R"("price":%.2f,"confidence":%.4f,"timestamp":%lld})",
+            static_cast<long long>(std::stoll(sig_evt.strategy_id)),
+            sig_evt.symbol.c_str(),
+            side_val,
+            sig_evt.quantity,
+            sig_evt.price,
+            sig_evt.confidence,
+            static_cast<long long>(sig_evt.timestamp_us()));
+    }
+    return std::string(buf);
 }
 
 std::string WsEventBridge::serialize_market(const event::Event& event) {

@@ -7,6 +7,9 @@
 #include "cpp/quant/factor/factor_registry.h"
 #include "cpp/quant/factor/op_registry.h"
 #include "cpp/quant/ir/ir_graph.h"
+#include <folly/futures/Future.h>
+
+#include "cpp/quant/network/global_executor.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/signal_handler.h"
 
@@ -14,6 +17,8 @@ namespace quant::strategy {
 
 StrategyEngine::StrategyEngine(event::EventBus& bus, storage::StorageEngine& storage)
     : bus_(bus), storage_(storage) {}
+
+// ── Legacy lifecycle ──
 
 bool StrategyEngine::activate(uint64_t strategy_id) {
     auto* entry = registry_.find(strategy_id);
@@ -84,6 +89,68 @@ bool StrategyEngine::is_active(uint64_t strategy_id) const {
     auto* entry = registry_.find(strategy_id);
     return entry && entry->status == StrategyStatus::kActive;
 }
+
+// ── Real-time live strategy management ──
+
+std::optional<SignalResult>
+StrategyEngine::start_live(uint64_t strategy_id,
+                            const ir::StrategyGraph& graph) {
+    auto* entry = registry_.find(strategy_id);
+    if (!entry) return std::nullopt;
+
+    // Check if already running
+    if (live_runners_.count(strategy_id)) {
+        // Return current signal if already running
+        return live_runners_[strategy_id]->latest_signal();
+    }
+
+    // Create and store the runner
+    auto runner = std::make_unique<StrategyRunner>(
+        strategy_id, graph, storage_, bus_);
+
+    // Launch the coroutine on the global executor (fire-and-forget)
+    auto* executor = network::GlobalExecutor::instance().executor();
+    if (executor) {
+        (void)std::move(runner->run())
+            .scheduleOn(executor)
+            .start();
+    }
+
+    live_runners_[strategy_id] = std::move(runner);
+    return live_runners_[strategy_id]->latest_signal();
+}
+
+void StrategyEngine::stop_live(uint64_t strategy_id) {
+    auto it = live_runners_.find(strategy_id);
+    if (it == live_runners_.end()) return;
+
+    it->second->stop();
+    live_runners_.erase(it);
+}
+
+LiveStatus StrategyEngine::live_status(uint64_t strategy_id) const {
+    auto it = live_runners_.find(strategy_id);
+    if (it == live_runners_.end()) {
+        return LiveStatus{false, std::nullopt, {}};
+    }
+
+    LiveStatus status;
+    status.is_running = it->second->running();
+    status.latest_signal = it->second->latest_signal();
+    status.factors = it->second->latest_factors();
+    return status;
+}
+
+std::vector<uint64_t> StrategyEngine::live_strategies() const {
+    std::vector<uint64_t> ids;
+    ids.reserve(live_runners_.size());
+    for (const auto& [id, _] : live_runners_) {
+        ids.push_back(id);
+    }
+    return ids;
+}
+
+// ── Registry access ──
 
 StrategyRegistry& StrategyEngine::registry() noexcept { return registry_; }
 const StrategyRegistry& StrategyEngine::registry() const noexcept { return registry_; }

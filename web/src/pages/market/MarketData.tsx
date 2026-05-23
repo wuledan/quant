@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dayjs from 'dayjs';
 import { Card, Col, Row, Select, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons';
-import { createChart, CandlestickSeries } from 'lightweight-charts';
+import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
 
 const { Title, Text } = Typography;
@@ -37,6 +37,8 @@ const MarketData: React.FC = () => {
   const [searchText, setSearchText] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<KlinePoint[]>([]);
+  const [factors, setFactors] = useState<Record<string, number[]>>({});
+  const [showFactors, setShowFactors] = useState<Record<string, boolean>>({ SMA_5: true, SMA_10: true, SMA_20: true, SMA_60: false });
   const [dateRange, setDateRange] = useState<[string, string]>(['2024-01-01', '']);
   const [lastUpdate, setLastUpdate] = useState<string>('');
 
@@ -72,6 +74,15 @@ const MarketData: React.FC = () => {
       }));
       setData(raw);
       setLastUpdate(new Date().toLocaleTimeString('zh-CN'));
+
+      // Fetch factors
+      try {
+        const fr = await fetch(`${API_BASE}/factors/compute?symbol=${sym}`, { method: 'POST' });
+        if (fr.ok) {
+          const fj = await fr.json();
+          setFactors(fj.factors || {});
+        }
+      } catch { /* factors optional */ }
     } catch {
       message.error('网络错误');
       setData([]);
@@ -151,6 +162,26 @@ const MarketData: React.FC = () => {
       }))
     );
 
+    // Add factor overlay lines (visible when showFactors[key] is true)
+    const factorColors: Record<string, string> = {
+      SMA_5: '#1677ff', SMA_10: '#fa8c16', SMA_20: '#722ed1', SMA_60: '#eb2f96',
+    };
+    Object.entries(factors).forEach(([name, values]) => {
+      if (showFactors[name] && values.length > 0) {
+        const lineSeries = chart.addSeries(LineSeries, {
+          color: factorColors[name] || '#52c41a',
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+        const lineData = values.map((v, i) => ({
+          time: data[i]?.date as Time,
+          value: v > 0 ? v : (data[i]?.close || 0),
+        })).filter(p => p.time);
+        lineSeries.setData(lineData);
+      }
+    });
+
     chart.timeScale().fitContent();
     chartRef.current = chart;
 
@@ -166,7 +197,7 @@ const MarketData: React.FC = () => {
       chart.remove();
       chartRef.current = null;
     };
-  }, [data]);
+  }, [data, factors, showFactors]);
 
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const first = data.length > 0 ? data[0] : null;
@@ -267,6 +298,18 @@ const MarketData: React.FC = () => {
             </Col>
           </Row>
 
+          <div style={{ marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {Object.keys(factors).length > 0 && (
+              <Space size="small">
+                {Object.entries(showFactors).map(([k, v]) => (
+                  <Button key={k} size="small" type={v ? 'primary' : 'default'}
+                    onClick={() => setShowFactors(s => ({ ...s, [k]: !s[k] }))}>
+                    {k}
+                  </Button>
+                ))}
+              </Space>
+            )}
+          </div>
           <Card title={`${symbolLabel} (${symbol}) K线图`} styles={{ body: { padding: 0 } }}>
             <div ref={chartContainerRef} style={{ width: '100%' }} />
           </Card>

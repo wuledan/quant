@@ -47,6 +47,11 @@ private:
     ApiResponse backtest_history(uint64_t id);
     ApiResponse clone_strategy(uint64_t id);
 
+    ApiResponse start_live_strategy(uint64_t id);
+    ApiResponse stop_live_strategy(uint64_t id);
+    ApiResponse live_status(uint64_t id);
+    ApiResponse live_list();
+
     ApiResponse handle_data(const std::string& method,
                              const std::vector<std::string>& segments,
                              const std::string& body,

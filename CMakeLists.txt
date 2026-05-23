@@ -269,6 +269,7 @@ add_library(quant_strategy
     cpp/quant/strategy/signal_handler.cc
     cpp/quant/strategy/strategy_registry.cc
     cpp/quant/strategy/strategy_engine.cc
+    cpp/quant/strategy/strategy_runner.cc
 )
 target_include_directories(quant_strategy PUBLIC ${CMAKE_SOURCE_DIR})
 target_link_libraries(quant_strategy PUBLIC quant_execution quant_event quant_factor quant_ir quant_storage)

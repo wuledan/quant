@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "cpp/quant/backtest/backtest_runner.h"
+#include "cpp/quant/ir/ir_graph.h"
 #include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/strategy_engine.h"
@@ -413,6 +414,11 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         return batch_backtest(body);
     }
 
+    // GET /api/strategies/live — list all live strategies
+    if (segments.size() == 3 && segments[2] == "live" && method == "GET") {
+        return live_list();
+    }
+
     // Need an ID at position 2
     if (segments.size() < 3) {
         return error_response(400, "Missing strategy ID");
@@ -439,6 +445,9 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         if (action == "backtest" && method == "POST")         return trigger_backtest(id, body);
         if (action == "backtest-history" && method == "GET")  return backtest_history(id);
         if (action == "clone" && method == "POST")            return clone_strategy(id);
+        if (action == "start_live" && method == "POST")       return start_live_strategy(id);
+        if (action == "stop_live" && method == "POST")        return stop_live_strategy(id);
+        if (action == "live_status" && method == "GET")       return live_status(id);
         return error_response(404, "Not found");
     }
 
@@ -847,6 +856,91 @@ ApiResponse StrategyApi::clone_strategy(uint64_t id) {
     }
 
     return {201, entry_to_json(*new_entry)};
+}
+
+// ── Live strategy management ──
+
+ApiResponse StrategyApi::start_live_strategy(uint64_t id) {
+    auto* entry = engine_.registry().find(id);
+    if (!entry) {
+        return error_response(404, "Strategy not found");
+    }
+    if (entry->graph_path.empty()) {
+        return error_response(400, "No graph_path configured");
+    }
+
+    // Load IR graph
+    ir::StrategyGraph graph;
+    try {
+        graph = ir::StrategyGraph::load_from_file(entry->graph_path);
+    } catch (const std::exception& e) {
+        return error_response(500, std::string("Failed to load graph: ") + e.what());
+    }
+
+    auto result = engine_.start_live(id, graph);
+    if (!result.has_value()) {
+        return error_response(409, "Cannot start live strategy");
+    }
+
+    return live_status(id);
+}
+
+ApiResponse StrategyApi::stop_live_strategy(uint64_t id) {
+    engine_.stop_live(id);
+
+    JsonWriter w;
+    w.begin_obj();
+    w.key("stopped"); w.os << "true"; w.comma();
+    w.key("strategy_id"); w.int_val(static_cast<int64_t>(id));
+    w.end_obj();
+    return success_response(w.os.str());
+}
+
+ApiResponse StrategyApi::live_status(uint64_t id) {
+    auto status = engine_.live_status(id);
+
+    JsonWriter w;
+    w.begin_obj();
+    w.key("is_running"); w.os << (status.is_running ? "true" : "false"); w.comma();
+
+    if (status.latest_signal.has_value()) {
+        w.key("latest_signal"); w.begin_obj();
+        w.key("timestamp"); w.int_val(status.latest_signal->timestamp); w.comma();
+        w.key("symbol"); w.str_val(status.latest_signal->symbol); w.comma();
+        w.key("price"); w.num_val(status.latest_signal->price); w.comma();
+        w.key("side"); w.int_val(status.latest_signal->side); w.comma();
+        w.key("quantity"); w.int_val(status.latest_signal->quantity); w.comma();
+        w.key("confidence"); w.num_val(status.latest_signal->confidence);
+        w.end_obj(); w.comma();
+    }
+
+    w.key("factors"); w.begin_obj();
+    size_t fi = 0;
+    for (const auto& [k, v] : status.factors) {
+        w.key(k); w.num_val(v);
+        if (++fi < status.factors.size()) w.comma();
+    }
+    w.end_obj();
+
+    w.end_obj();
+    return success_response(w.os.str());
+}
+
+ApiResponse StrategyApi::live_list() {
+    auto ids = engine_.live_strategies();
+
+    JsonWriter w;
+    w.begin_arr();
+    for (size_t i = 0; i < ids.size(); ++i) {
+        auto status = engine_.live_status(ids[i]);
+        w.begin_obj();
+        w.key("strategy_id"); w.int_val(static_cast<int64_t>(ids[i])); w.comma();
+        w.key("is_running"); w.os << (status.is_running ? "true" : "false");
+        w.end_obj();
+        if (i + 1 < ids.size()) w.comma();
+    }
+    w.end_arr();
+    return success_response(w.os.str());
 }
 
 // ── JSON serialization ──

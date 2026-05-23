@@ -14,6 +14,8 @@ const StrategyCreate = lazy(() => import('./pages/strategies/StrategyCreate'));
 const StrategyDetail = lazy(() => import('./pages/strategies/StrategyDetail'));
 const StrategyUpload = lazy(() => import('./pages/strategies/StrategyUpload'));
 const MarketData = lazy(() => import('./pages/market/MarketData'));
+const LiveStrategy = lazy(() => import('./pages/strategy/LiveStrategy'));
+const StrategyBacktest = lazy(() => import('./pages/backtest/StrategyBacktest'));
 const Backtest = lazy(() => import('./pages/backtest/Backtest'));
 const BacktestResult = lazy(() => import('./pages/backtest/BacktestResult'));
 const News = lazy(() => import('./pages/news/News'));
@@ -69,6 +71,22 @@ function App() {
               element={
                 <SuspenseWrapper>
                   <StrategyUpload />
+                </SuspenseWrapper>
+              }
+            />
+            <Route
+              path="strategies/:id/backtest"
+              element={
+                <SuspenseWrapper>
+                  <StrategyBacktest />
+                </SuspenseWrapper>
+              }
+            />
+            <Route
+              path="strategy/:id/live"
+              element={
+                <SuspenseWrapper>
+                  <LiveStrategy />
                 </SuspenseWrapper>
               }
             />
