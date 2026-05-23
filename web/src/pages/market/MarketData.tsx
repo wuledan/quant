@@ -57,8 +57,12 @@ const MarketData: React.FC = () => {
         return;
       }
       const json = await res.json();
-      const raw: KlinePoint[] = (json.data || []).map((d: Record<string, unknown>) => ({
-        date: d.date as string,
+      // Backend returns plain array, not {data: [...]}
+      const arr: Record<string, unknown>[] = Array.isArray(json) ? json : (json.data || []);
+      const raw: KlinePoint[] = arr.map((d: Record<string, unknown>) => ({
+        date: typeof d.timestamp === 'number'
+          ? dayjs(d.timestamp as number).format('YYYY-MM-DD')
+          : (d.date as string || ''),
         open: d.open as number,
         high: d.high as number,
         low: d.low as number,
