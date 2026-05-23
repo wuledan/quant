@@ -248,6 +248,25 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         w.end_obj();
         return success_response(w.os.str());
     }
+    // /api/data/daily/:symbol (before general data handler)
+    if (segments[1] == "data" && segments.size() >= 4 && segments[2] == "daily") {
+        JsonWriter w;
+        w.begin_arr();
+        auto rows = storage_.query_kline(segments[3], 7, 0, INT64_MAX);
+        for (size_t i = 0; i < rows.size(); ++i) {
+            w.begin_obj();
+            w.key("timestamp"); w.int_val(rows[i].timestamp); w.comma();
+            w.key("open"); w.num_val(static_cast<double>(rows[i].open_price) / 10000.0); w.comma();
+            w.key("high"); w.num_val(static_cast<double>(rows[i].high_price) / 10000.0); w.comma();
+            w.key("low"); w.num_val(static_cast<double>(rows[i].low_price) / 10000.0); w.comma();
+            w.key("close"); w.num_val(static_cast<double>(rows[i].close_price) / 10000.0); w.comma();
+            w.key("volume"); w.num_val(static_cast<double>(rows[i].volume));
+            w.end_obj();
+            if (i + 1 < rows.size()) w.comma();
+        }
+        w.end_arr();
+        return success_response(w.os.str());
+    }
     if (segments[1] == "data") {
         return handle_data(method, segments, body, query);
     }
@@ -286,14 +305,6 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
         }
         return error_response(404, "Not found");
     }
-    // GET /api/data/daily/:symbol?start=&end=
-    if (segments[1] == "data" && segments.size() >= 4 && segments[2] == "daily") {
-        std::string q = "symbol=" + segments[3];
-        if (!query.empty()) q += "&" + query;
-        std::vector<std::string> fake_segs = {"api", "data", "kline"};
-        return handle_data(method, fake_segs, body, q);
-    }
-
     // ── Strategy routes: /api/strategies/* ──
     if (segments[1] != "strategies") {
         return error_response(404, "Not found");
