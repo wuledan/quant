@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include "cpp/quant/backtest/backtest_runner.h"
+#include "cpp/quant/storage/column_block.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/strategy_engine.h"
 #include "cpp/quant/strategy/strategy_registry.h"
@@ -214,7 +215,8 @@ StrategyApi::StrategyApi(strategy::StrategyEngine& engine,
 
 ApiResponse StrategyApi::handle_request(const std::string& method,
                                           const std::string& path,
-                                          const std::string& body) {
+                                          const std::string& body,
+                                          const std::string& query) {
     // Parse path segments
     std::vector<std::string> segments;
     std::string seg;
@@ -237,7 +239,7 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
 
     // ── Market data routes: /api/data/* ──
     if (segments[1] == "data") {
-        return handle_data(method, segments, body);
+        return handle_data(method, segments, body, query);
     }
 
     // ── Symbols: /api/symbols ──
@@ -745,12 +747,41 @@ std::string StrategyApi::result_to_json(const backtest::BacktestResult& result) 
 
 ApiResponse StrategyApi::handle_data(const std::string& method,
                                       const std::vector<std::string>& segments,
-                                      const std::string& body) {
+                                      const std::string& body,
+                                      const std::string& query) {
     // GET /api/data/kline?symbol=&interval=&start=&end=
     if (segments.size() >= 3 && segments[2] == "kline" && method == "GET") {
-        // Return plain array matching frontend KlineData[]
+        // Parse query string: symbol=600519.SH&interval=1d
+        std::string symbol;
+        for (size_t i = 0; i + 6 < query.size(); ) {
+            size_t eq = query.find('=', i);
+            size_t amp = query.find('&', eq);
+            if (eq == std::string::npos) break;
+            std::string key = query.substr(i, eq - i);
+            std::string val = query.substr(eq + 1, (amp == std::string::npos ? query.size() : amp) - eq - 1);
+            if (key == "symbol") symbol = val;
+            if (amp == std::string::npos) break;
+            i = amp + 1;
+        }
+
         JsonWriter w;
-        w.begin_arr(); w.end_arr();
+        w.begin_arr();
+        if (!symbol.empty()) {
+            // Query storage engine: all data for this symbol, KlineFreq::kDay = 7
+            auto rows = storage_.query_kline(symbol, static_cast<uint8_t>(storage::KlineFreq::kDay), 0, INT64_MAX);
+            for (size_t i = 0; i < rows.size(); ++i) {
+                w.begin_obj();
+                w.key("timestamp"); w.int_val(rows[i].timestamp); w.comma();
+                w.key("open"); w.num_val(static_cast<double>(rows[i].open_price) / 10000.0); w.comma();
+                w.key("high"); w.num_val(static_cast<double>(rows[i].high_price) / 10000.0); w.comma();
+                w.key("low"); w.num_val(static_cast<double>(rows[i].low_price) / 10000.0); w.comma();
+                w.key("close"); w.num_val(static_cast<double>(rows[i].close_price) / 10000.0); w.comma();
+                w.key("volume"); w.num_val(static_cast<double>(rows[i].volume));
+                w.end_obj();
+                if (i + 1 < rows.size()) w.comma();
+            }
+        }
+        w.end_arr();
         return success_response(w.os.str());
     }
     // GET /api/data/ticker?symbol=

@@ -192,7 +192,7 @@ int main(int argc, char* argv[]) {
 
     network::HttpServer http_server(http_config);
     http_server.set_handler([&strategy_api](const network::HttpRequest& req) -> network::HttpResponse {
-        auto api_resp = strategy_api.handle_request(req.method, req.path, req.body);
+        auto api_resp = strategy_api.handle_request(req.method, req.path, req.body, req.query_string);
         network::HttpResponse http_resp;
         http_resp.status_code = api_resp.status_code;
         http_resp.body = api_resp.body;

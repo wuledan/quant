@@ -31,7 +31,8 @@ public:
 
     ApiResponse handle_request(const std::string& method,
                                 const std::string& path,
-                                const std::string& body = "");
+                                const std::string& body = "",
+                                const std::string& query = "");
 
 private:
     ApiResponse list_strategies();
@@ -48,7 +49,8 @@ private:
 
     ApiResponse handle_data(const std::string& method,
                              const std::vector<std::string>& segments,
-                             const std::string& body);
+                             const std::string& body,
+                             const std::string& query);
     ApiResponse handle_symbols();
 
     std::string entry_to_json(const strategy::StrategyEntry& entry);
