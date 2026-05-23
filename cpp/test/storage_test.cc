@@ -4,6 +4,8 @@
 #include <vector>
 
 #include "cpp/quant/storage/column_block.h"
+#include "cpp/quant/storage/corporate_action_store.h"
+#include "cpp/quant/storage/factor_store.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/storage/time_series_cache.h"
 #include "cpp/quant/storage/time_series_store.h"
@@ -1522,4 +1524,269 @@ TEST(ColdUploadDaemonTest, EmptyDirectoryFindsNothing) {
         EXPECT_TRUE(cold.empty());
     }
     std::filesystem::remove_all("/tmp/quant_test_cold_daemon_empty");
+}
+
+// ── T5.2: PostgresStore tests ──
+
+#include "cpp/quant/storage/postgres_store.h"
+
+static bool postgres_available() {
+    int rc = system(
+        "psql 'postgresql://quant@127.0.0.1:5432/quant_invest' "
+        "-c 'SELECT 1' -q 2>/dev/null");
+    return rc == 0;
+}
+
+TEST(PostgresStoreTest, ConnectFailureNoServer) {
+    PostgresStore store(PostgresStore::Options{
+        .host = "127.0.0.1",
+        .port = 65432,  // unlikely port
+        .dbname = "quant_invest",
+        .user = "quant",
+    });
+    EXPECT_FALSE(store.connect());
+    EXPECT_FALSE(store.is_connected());
+}
+
+TEST(PostgresStoreTest, ConnectAndSchema) {
+    if (!postgres_available()) {
+        GTEST_SKIP() << "PostgreSQL not available at quant@127.0.0.1/quant_invest";
+    }
+
+    PostgresStore store(PostgresStore::Options{
+        .host = "127.0.0.1",
+        .port = 5432,
+        .dbname = "quant_invest",
+        .user = "quant",
+    });
+
+    ASSERT_TRUE(store.connect());
+    EXPECT_TRUE(store.is_connected());
+
+    // Schema should succeed
+    EXPECT_TRUE(store.init_schema());
+}
+
+TEST(PostgresStoreTest, InsertAndQueryBacktest) {
+    if (!postgres_available()) {
+        GTEST_SKIP() << "PostgreSQL not available at quant@127.0.0.1/quant_invest";
+    }
+
+    PostgresStore store(PostgresStore::Options{
+        .host = "127.0.0.1",
+        .port = 5432,
+        .dbname = "quant_invest",
+        .user = "quant",
+    });
+
+    ASSERT_TRUE(store.connect());
+    ASSERT_TRUE(store.init_schema());
+
+    // Insert a backtest result
+    ASSERT_TRUE(store.insert_backtest_result(
+        42, "000001", 1735689600000000, 1735776000000000,
+        15.5, 12.3, -5.2, 1.8, 150, "[]"));
+
+    // Query it back
+    auto results = store.query_backtest_results(42, 10);
+    ASSERT_GE(results.size(), 1u);
+
+    bool found = false;
+    for (const auto& r : results) {
+        if (r.strategy_id == 42 && r.symbol == "000001") {
+            found = true;
+            EXPECT_DOUBLE_EQ(r.total_return, 15.5);
+            EXPECT_DOUBLE_EQ(r.annual_return, 12.3);
+            EXPECT_DOUBLE_EQ(r.max_drawdown, -5.2);
+            EXPECT_DOUBLE_EQ(r.sharpe_ratio, 1.8);
+            EXPECT_EQ(r.total_trades, 150);
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(PostgresStoreTest, InsertAndListSymbols) {
+    if (!postgres_available()) {
+        GTEST_SKIP() << "PostgreSQL not available at quant@127.0.0.1/quant_invest";
+    }
+
+    PostgresStore store(PostgresStore::Options{
+        .host = "127.0.0.1",
+        .port = 5432,
+        .dbname = "quant_invest",
+        .user = "quant",
+    });
+
+    ASSERT_TRUE(store.connect());
+    ASSERT_TRUE(store.init_schema());
+
+    // Insert a symbol
+    ASSERT_TRUE(store.insert_symbol("000001", "Ping An", "SZ", "ACTIVE"));
+    ASSERT_TRUE(store.insert_symbol("600519", "Moutai", "SH", "ACTIVE"));
+
+    // List all active symbols
+    auto symbols = store.list_symbols("ACTIVE");
+    ASSERT_GE(symbols.size(), 2u);
+
+    bool found_000001 = false;
+    bool found_600519 = false;
+    for (const auto& s : symbols) {
+        if (s == "000001") found_000001 = true;
+        if (s == "600519") found_600519 = true;
+    }
+    EXPECT_TRUE(found_000001);
+    EXPECT_TRUE(found_600519);
+}
+
+// ── T5.3: FactorStore tests ──
+
+TEST(FactorStoreTest, PutAndQueryFactor) {
+    std::filesystem::remove_all("/tmp/quant_test_factor_1");
+    std::filesystem::create_directories("/tmp/quant_test_factor_1");
+    {
+        FactorStore store(FactorStore::Options{"/tmp/quant_test_factor_1"});
+
+        store.put_factor(20240101, "000001", "pe", 15.0);
+        store.put_factor(20240102, "000001", "pe", 16.0);
+        store.put_factor(20240103, "000001", "pe", 14.5);
+        store.put_factor(20240101, "600519", "pe", 25.0);
+
+        auto pe_000001 = store.query_factor("000001", "pe", 20240101, 20240103);
+        ASSERT_EQ(pe_000001.size(), 3u);
+        EXPECT_DOUBLE_EQ(pe_000001[0], 15.0);
+        EXPECT_DOUBLE_EQ(pe_000001[1], 16.0);
+        EXPECT_DOUBLE_EQ(pe_000001[2], 14.5);
+
+        auto pe_600519 = store.query_factor("600519", "pe", 20240101, 20240103);
+        ASSERT_EQ(pe_600519.size(), 1u);
+        EXPECT_DOUBLE_EQ(pe_600519[0], 25.0);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_factor_1");
+}
+
+TEST(FactorStoreTest, PutFactorBatch) {
+    std::filesystem::remove_all("/tmp/quant_test_factor_2");
+    std::filesystem::create_directories("/tmp/quant_test_factor_2");
+    {
+        FactorStore store(FactorStore::Options{"/tmp/quant_test_factor_2"});
+
+        store.put_factor_batch(20240101, "pe", {
+            {"000001", 15.0},
+            {"600519", 25.0},
+            {"000002", 12.5},
+        });
+
+        auto cs = store.query_cross_section(20240101, "pe");
+        ASSERT_EQ(cs.size(), 3u);
+
+        std::unordered_map<std::string, double> cs_map(cs.begin(), cs.end());
+        EXPECT_DOUBLE_EQ(cs_map["000001"], 15.0);
+        EXPECT_DOUBLE_EQ(cs_map["600519"], 25.0);
+        EXPECT_DOUBLE_EQ(cs_map["000002"], 12.5);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_factor_2");
+}
+
+TEST(FactorStoreTest, FlushAndLoadRoundTrip) {
+    std::filesystem::remove_all("/tmp/quant_test_factor_3");
+    std::filesystem::create_directories("/tmp/quant_test_factor_3");
+    {
+        FactorStore store(FactorStore::Options{"/tmp/quant_test_factor_3"});
+
+        store.put_factor(20240101, "000001", "pe", 15.0);
+        store.put_factor(20240102, "000001", "pe", 16.0);
+        store.put_factor(20240101, "600519", "pe", 25.0);
+        store.put_factor(20240101, "000001", "pb", 2.0);
+
+        store.flush();
+    }
+    {
+        FactorStore store(FactorStore::Options{"/tmp/quant_test_factor_3"});
+        store.load();
+
+        EXPECT_EQ(store.num_factors(), 2u);
+
+        auto pe_000001 = store.query_factor("000001", "pe", 20240101, 20240102);
+        ASSERT_EQ(pe_000001.size(), 2u);
+        EXPECT_DOUBLE_EQ(pe_000001[0], 15.0);
+
+        auto pb_000001 = store.query_factor("000001", "pb", 20240101, 20240102);
+        ASSERT_EQ(pb_000001.size(), 1u);
+        EXPECT_DOUBLE_EQ(pb_000001[0], 2.0);
+
+        auto cs = store.query_cross_section(20240101, "pe");
+        ASSERT_EQ(cs.size(), 2u);
+    }
+    std::filesystem::remove_all("/tmp/quant_test_factor_3");
+}
+
+TEST(FactorStoreTest, QueryFactorEmptyResult) {
+    std::filesystem::remove_all("/tmp/quant_test_factor_4");
+    std::filesystem::create_directories("/tmp/quant_test_factor_4");
+    {
+        FactorStore store(FactorStore::Options{"/tmp/quant_test_factor_4"});
+
+        store.put_factor(20240101, "000001", "pe", 15.0);
+
+        auto result = store.query_factor("000001", "nonexistent", 0, 99999999);
+        EXPECT_TRUE(result.empty());
+
+        auto result2 = store.query_factor("nonexistent", "pe", 0, 99999999);
+        EXPECT_TRUE(result2.empty());
+    }
+    std::filesystem::remove_all("/tmp/quant_test_factor_4");
+}
+
+// ── T5.4: CorporateActionStore tests ──
+
+TEST(CorporateActionStoreTest, AddAndQueryActions) {
+    CorporateActionStore store(CorporateActionStore::Options{"/tmp"});
+
+    store.add_action({"000001", 20240101, ActionType::kDividend, 0.5, 0.98});
+    store.add_action({"000001", 20240601, ActionType::kSplit, 2.0, 0.95});
+    store.add_action({"600519", 20240301, ActionType::kDividend, 1.0, 0.97});
+
+    auto all = store.query_actions("000001", 0, 99999999);
+    ASSERT_EQ(all.size(), 2u);
+    EXPECT_EQ(all[0].action_date, 20240101);
+    EXPECT_EQ(all[1].action_date, 20240601);
+
+    auto sub = store.query_actions("000001", 20240201, 20240701);
+    ASSERT_EQ(sub.size(), 1u);
+    EXPECT_EQ(sub[0].action_date, 20240601);
+
+    auto empty = store.query_actions("999999", 0, 99999999);
+    EXPECT_TRUE(empty.empty());
+}
+
+TEST(CorporateActionStoreTest, AdjustPriceBackward) {
+    CorporateActionStore store(CorporateActionStore::Options{"/tmp"});
+
+    store.add_action({"000001", 20240201, ActionType::kDividend, 0.2, 0.98});
+
+    double adjusted_before = store.adjust_price("000001", 20240101, 10.0);
+    EXPECT_NEAR(adjusted_before, 10.0 / 0.98, 0.0001);
+
+    double adjusted_after = store.adjust_price("000001", 20240301, 9.8);
+    EXPECT_NEAR(adjusted_after, 9.8, 0.0001);
+
+    // Multiple actions: cumulative adjustment
+    store.add_action({"000001", 20240801, ActionType::kSplit, 2.0, 0.90});
+
+    double adjusted_early = store.adjust_price("000001", 20240101, 10.0);
+    EXPECT_NEAR(adjusted_early, 10.0 / (0.98 * 0.90), 0.0001);
+}
+
+TEST(CorporateActionStoreTest, EmptyStore) {
+    CorporateActionStore store(CorporateActionStore::Options{"/tmp"});
+
+    auto actions = store.query_actions("nonexistent", 0, 99999999);
+    EXPECT_TRUE(actions.empty());
+
+    double price = store.adjust_price("nonexistent", 20240101, 100.0);
+    EXPECT_DOUBLE_EQ(price, 100.0);
+
+    EXPECT_EQ(store.num_actions(), 0u);
+    EXPECT_EQ(store.num_symbols(), 0u);
 }
