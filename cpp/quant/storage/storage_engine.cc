@@ -102,6 +102,13 @@ CoTask<std::vector<KlineRow>> StorageEngine::co_query_kline(
 }
 
 DiskPersistence& StorageEngine::disk() noexcept {
+    if (stores_.empty()) {
+        auto store = std::make_unique<TimeSeriesStore>(TimeSeriesStore::Options{
+            .cache_opts = TimeSeriesCache::Options{.num_shards = 4, .budget_mb = 1},
+            .data_dir = opts_.data_dir / "segments",
+        });
+        stores_["__default__"] = std::move(store);
+    }
     return stores_.begin()->second->disk();
 }
 

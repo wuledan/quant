@@ -18,6 +18,8 @@
 #include <string>
 #include <thread>
 
+#include <folly/init/Init.h>
+
 #include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/api/strategy_api.h"
 #include "cpp/quant/backtest/backtest_runner.h"
@@ -51,6 +53,10 @@ static void signal_handler(int sig) {
 }
 
 int main(int argc, char* argv[]) {
+    // Initialize folly (required for Timekeeper/Singleton infra before any
+    // coroutine library component is accessed).
+    folly::init(&argc, &argv);
+
     std::cout << "[Service] QuantInvest C++ resident service starting...\n";
 
     // ── Register signal handlers ──
@@ -67,7 +73,8 @@ int main(int argc, char* argv[]) {
     storage_opts.data_dir = "./data";
     storage_opts.cache_budget_mb = 256;
     storage::StorageEngine storage(storage_opts);
-    std::cout << "[Service] StorageEngine created (data_dir=./data, cache_budget=256MB)\n";
+    storage.start();
+    std::cout << "[Service] StorageEngine created and started (data_dir=./data, cache_budget=256MB)\n";
 
     // ── 2.5 Create WriteBuffer with WAL for buffered writes ──
     storage::WriteBuffer::Options wb_opts;
@@ -141,7 +148,7 @@ int main(int argc, char* argv[]) {
 
     // ── 6.5 Create RemoteStorage and ColdUploadDaemon ──
     storage::RemoteStorage::Options remote_opts;
-    remote_opts.endpoint = "http://127.0.0.1:9000";
+    remote_opts.endpoint = "http://127.0.0.1:9010";
     remote_opts.access_key = "minioadmin";
     remote_opts.secret_key = "minioadmin";
     remote_opts.bucket_kline = "quant-kline";
