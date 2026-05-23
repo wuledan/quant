@@ -21,10 +21,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/py/, '/api'),
       },
-      // Legacy /api/v1 still points to Python for other endpoints
+      // /api/v1 → C++ backend (legacy frontend pages)
       '/api/v1': {
-        target: 'http://192.168.3.10:8000',
+        target: 'http://192.168.3.10:9191',
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/v1/, '/api'),
       },
       '/ws': {
         target: 'ws://192.168.3.10:8282',
