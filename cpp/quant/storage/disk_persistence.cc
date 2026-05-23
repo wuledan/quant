@@ -114,7 +114,7 @@ std::vector<ColumnBlock> DiskPersistence::read_segment(
     // Read header
     SegmentHeader header;
     ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (header.magic != kSegmentMagic) return {};
+    if (!ifs || header.magic != kSegmentMagic) return {};
 
     // Read index
     std::vector<BlockIndexEntry> index(header.num_blocks);
@@ -146,7 +146,7 @@ std::vector<ColumnBlock> DiskPersistence::read_segment_filtered(
 
     SegmentHeader header;
     ifs.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (header.magic != kSegmentMagic) return {};
+    if (!ifs || header.magic != kSegmentMagic) return {};
 
     // Quick range check
     if (header.segment_end_ts < range_begin ||

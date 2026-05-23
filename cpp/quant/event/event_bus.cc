@@ -10,9 +10,6 @@
 #include "queue/mpsc_queue.h"
 
 #include <algorithm>
-#include <condition_variable>
-#include <mutex>
-#include <shared_mutex>
 #include <utility>
 
 namespace quant::event {
@@ -56,7 +53,7 @@ public:
         size_t shard_idx = type % opts_.subscriber_shard_count;
 
         {
-            std::unique_lock lock(subscriptions_[shard_idx]->rwlock);
+            auto lock = infra::blockingWait(subscriptions_[shard_idx]->rwlock.co_scoped_lock());
             subscriptions_[shard_idx]->entries.push_back(SubscriptionEntry{
                 .id = id,
                 .type_id = type,
@@ -69,7 +66,7 @@ public:
 
     void unsubscribe(SubscriptionId id) {
         for (auto& shard : subscriptions_) {
-            std::unique_lock lock(shard->rwlock);
+            auto lock = infra::blockingWait(shard->rwlock.co_scoped_lock());
             auto it = std::remove_if(shard->entries.begin(), shard->entries.end(),
                 [id](const SubscriptionEntry& e) { return e.id == id; });
             if (it != shard->entries.end()) {
@@ -83,7 +80,7 @@ public:
         EventTypeId type = event->event_type_id();
         size_t shard_idx = type % opts_.subscriber_shard_count;
 
-        std::shared_lock lock(subscriptions_[shard_idx]->rwlock);
+        auto lock = infra::blockingWait(subscriptions_[shard_idx]->rwlock.co_scoped_shared_lock());
         for (const auto& entry : subscriptions_[shard_idx]->entries) {
             if (entry.type_id == type) {
                 if (entry.filter && !entry.filter->accept(*event)) {
@@ -98,13 +95,9 @@ public:
     }
 
     void publish_async(std::unique_ptr<Event> event) {
-        {
-            std::lock_guard<std::mutex> lock(cv_mutex_);
-            async_queue_.enqueue(std::move(event));
-            stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
-        }
+        async_queue_.enqueue(std::move(event));
+        stats_.queue_depth.fetch_add(1, std::memory_order_relaxed);
         ensure_async_worker();
-        async_cv_.notify_one();
     }
 
     quant::infra::CoTask<void> co_publish(std::unique_ptr<Event> event) {
@@ -136,22 +129,17 @@ public:
         };
     }
 
-    // ── Explicit lifecycle (thread-based) ──
+    // ── Explicit lifecycle (thread-based, polling dispatch) ──
     void start() {
-        std::lock_guard<std::mutex> lock(worker_mutex_);
+        auto lock = infra::blockingWait(worker_mutex_.co_scoped_lock());
         if (async_worker_.joinable()) return;
         stop_requested_.store(false, std::memory_order_release);
         async_worker_ = std::thread([this] { async_worker_loop(); });
     }
 
     void stop() {
-        {
-            std::lock_guard<std::mutex> lock(cv_mutex_);
-            stop_requested_.store(true, std::memory_order_release);
-        }
-        async_cv_.notify_one();
-
-        std::lock_guard<std::mutex> lock(worker_mutex_);
+        stop_requested_.store(true, std::memory_order_release);
+        auto lock = infra::blockingWait(worker_mutex_.co_scoped_lock());
         if (async_worker_.joinable()) {
             async_worker_.join();
         }
@@ -198,46 +186,31 @@ public:
 
 private:
     void ensure_async_worker() {
-        std::lock_guard<std::mutex> lock(worker_mutex_);
+        auto lock = infra::blockingWait(worker_mutex_.co_scoped_lock());
         if (async_worker_.joinable()) return;
         async_worker_ = std::thread([this] { async_worker_loop(); });
     }
 
     void async_worker_loop() {
-        while (true) {
-            std::unique_ptr<Event> event;
-
-            // Drain all available events before waiting
-            while (true) {
-                std::unique_ptr<Event> ev;
-                {
-                    std::lock_guard<std::mutex> lock(cv_mutex_);
-                    if (!async_queue_.dequeue(ev)) break;
-                }
+        while (!stop_requested_.load(std::memory_order_acquire)) {
+            // Drain all available events
+            std::unique_ptr<Event> ev;
+            while (async_queue_.dequeue(ev)) {
                 if (ev) {
                     publish(std::move(ev));
                     stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
                 }
             }
-
-            // Wait for new events or stop signal
-            {
-                std::unique_lock<std::mutex> lock(cv_mutex_);
-                async_cv_.wait(lock, [this] {
-                    return stop_requested_.load(std::memory_order_acquire)
-                           || !async_queue_.empty();
-                });
-
-                if (stop_requested_.load(std::memory_order_acquire)) {
-                    std::unique_ptr<Event> remaining;
-                    while (async_queue_.dequeue(remaining)) {
-                        if (remaining) {
-                            publish(std::move(remaining));
-                            stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
-                        }
-                    }
-                    return;
-                }
+            if (!stop_requested_.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        // Final drain on stop
+        std::unique_ptr<Event> remaining;
+        while (async_queue_.dequeue(remaining)) {
+            if (remaining) {
+                publish(std::move(remaining));
+                stats_.queue_depth.fetch_sub(1, std::memory_order_relaxed);
             }
         }
     }
@@ -247,15 +220,13 @@ private:
 
     // Sharded subscription lists
     struct Shard {
-        mutable std::shared_mutex rwlock;
+        mutable infra::AffinitySharedMutex rwlock;
         std::vector<SubscriptionEntry> entries;
     };
     std::vector<std::unique_ptr<Shard>> subscriptions_;
 
     // Lock-free MPSC async delivery queue
     MPSCQueue<std::unique_ptr<Event>> async_queue_;
-    std::mutex cv_mutex_;
-    std::condition_variable async_cv_;
     std::atomic<bool> stop_requested_{false};
 
     // Coroutine dispatch primitives
@@ -263,7 +234,7 @@ private:
     quant::infra::WorkStealingExecutor* async_executor_{nullptr};
 
     std::thread async_worker_;
-    std::mutex worker_mutex_;
+    infra::AffinityMutex worker_mutex_;
 
     // Stats
     StatsData stats_;

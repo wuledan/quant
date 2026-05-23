@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 
+#include "cpp/quant/infra/coroutine.h"
 #include "cpp/quant/api/strategy_api.h"
 #include "cpp/quant/backtest/backtest_runner.h"
 #include "cpp/quant/event/event_bus.h"
@@ -39,9 +40,11 @@ using namespace quant;
 
 // ── Global state for signal handler ──
 static volatile std::sig_atomic_t g_shutdown_requested = 0;
+static infra::AffinityBaton g_shutdown_baton;
 
 static void signal_handler(int sig) {
     g_shutdown_requested = 1;
+    g_shutdown_baton.post_direct();
     std::cout << "\n[Service] Received signal " << sig << ", shutting down...\n";
 }
 
@@ -181,8 +184,8 @@ int main(int argc, char* argv[]) {
     std::cout << "[Service] Press Ctrl+C to shut down.\n";
 
     // ── 8. Wait for shutdown signal ──
-    while (!g_shutdown_requested) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!g_shutdown_requested) {
+        infra::blockingWait(g_shutdown_baton.co_wait());
     }
 
     // ── Graceful shutdown ──

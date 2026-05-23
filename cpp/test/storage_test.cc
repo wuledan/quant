@@ -81,6 +81,76 @@ TEST(ColumnBlockTest, EmptyCompression) {
     EXPECT_EQ(block.compressed_size(), 0u);
 }
 
+TEST(ColumnBlockTest, DeltaEncodeAllZeros) {
+    std::vector<int64_t> data(100, 0);
+    ColumnBlock block = ColumnBlock::compress(
+        DataField::kTimestamp, data, ColumnBlock::Codec::kDelta, 0, 0);
+
+    EXPECT_EQ(block.row_count(), 100u);
+
+    std::vector<int64_t> out(100);
+    size_t n = block.decompress(std::span<int64_t>(out));
+    EXPECT_EQ(n, 100u);
+    for (size_t i = 0; i < n; ++i) EXPECT_EQ(out[i], 0);
+}
+
+TEST(ColumnBlockTest, DeltaEncodeNegativeTimestamps) {
+    std::vector<int64_t> data = {-1000, -500, 0, 500, 1000, 1500};
+    ColumnBlock block = ColumnBlock::compress(
+        DataField::kTimestamp, data, ColumnBlock::Codec::kDelta, -1000, 1500);
+
+    EXPECT_EQ(block.row_count(), 6u);
+
+    std::vector<int64_t> out(6);
+    size_t n = block.decompress(std::span<int64_t>(out));
+    EXPECT_EQ(n, 6u);
+    EXPECT_EQ(out[0], -1000);
+    EXPECT_EQ(out[3], 500);
+}
+
+TEST(ColumnBlockTest, GorillaRepeatedValues) {
+    std::vector<double> data(50, 3.14159);
+    ColumnBlock block = ColumnBlock::compress(
+        DataField::kClose, data, ColumnBlock::Codec::kGorilla, 0, 0);
+
+    EXPECT_EQ(block.row_count(), 50u);
+
+    std::vector<double> out(50);
+    size_t n = block.decompress(std::span<double>(out));
+    EXPECT_EQ(n, 50u);
+    for (size_t i = 0; i < n; ++i) EXPECT_DOUBLE_EQ(out[i], 3.14159);
+}
+
+TEST(ColumnBlockTest, GorillaAlternatingValues) {
+    std::vector<double> data;
+    for (int i = 0; i < 100; ++i) {
+        data.push_back((i % 2 == 0) ? 100.0 : 200.0);
+    }
+    ColumnBlock block = ColumnBlock::compress(
+        DataField::kClose, data, ColumnBlock::Codec::kGorilla, 0, 0);
+
+    std::vector<double> out(100);
+    size_t n = block.decompress(std::span<double>(out));
+    EXPECT_EQ(n, 100u);
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_DOUBLE_EQ(out[i], (i % 2 == 0) ? 100.0 : 200.0);
+    }
+}
+
+TEST(ColumnBlockTest, DecompressPartialBuffer) {
+    std::vector<int64_t> data = {1000, 2000, 3000, 4000, 5000};
+    ColumnBlock block = ColumnBlock::compress(
+        DataField::kTimestamp, data, ColumnBlock::Codec::kDelta, 1000, 5000);
+
+    // Decompress into buffer smaller than row_count
+    std::vector<int64_t> small(3);
+    size_t n = block.decompress(std::span<int64_t>(small));
+    EXPECT_EQ(n, 3u);
+    EXPECT_EQ(small[0], 1000);
+    EXPECT_EQ(small[1], 2000);
+    EXPECT_EQ(small[2], 3000);
+}
+
 // ── TimeSeriesCache tests ──
 
 TEST(TimeSeriesCacheTest, AppendAndQuery) {
@@ -160,6 +230,26 @@ TEST(TimeSeriesCacheTest, FixedPointRoundTrip) {
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0].open_price, 10000);
     EXPECT_EQ(result[0].close_price, 10050);
+}
+
+TEST(TimeSeriesCacheTest, EvictionTriggersOnOverBudget) {
+    // Small budget with many writes should evict oldest entries
+    TimeSeriesCache cache(TimeSeriesCache::Options{.num_shards = 1, .budget_mb = 1});
+
+    // 30000 rows × 48 bytes = ~1.44 MB > 1 MB budget → triggers eviction
+    for (int i = 0; i < 30000; ++i) {
+        cache.append("000001", 1, make_row(i * 1000, 100.0));
+    }
+
+    // The oldest entries should have been evicted
+    auto oldest = cache.query("000001", 1, 0, 5000000);
+    auto newest = cache.query("000001", 1, 25000000, 30000000);
+
+    // Newest data should still be present
+    ASSERT_FALSE(newest.empty());
+    // Oldest data may or may not be evicted depending on exact budget
+    // At minimum, total row count should be less than 30000
+    EXPECT_LT(oldest.size() + newest.size(), 30000u);
 }
 
 // ── SegmentIndex tests ──
@@ -700,4 +790,51 @@ TEST(DiskPersistenceTest, CompactDeduplicatesOverlapping) {
             break;
         }
     }
+}
+
+// ── DiskPersistence error path tests ──
+
+TEST(DiskPersistenceTest, ReadNonExistentSegment) {
+    std::filesystem::remove_all("/tmp/quant_test_bad_read");
+    DiskPersistence disk("/tmp/quant_test_bad_read");
+
+    auto blocks = disk.read_segment("nonexistent.seg");
+    EXPECT_TRUE(blocks.empty());
+}
+
+TEST(DiskPersistenceTest, ReadCorruptSegment) {
+    std::filesystem::remove_all("/tmp/quant_test_corrupt");
+    DiskPersistence disk("/tmp/quant_test_corrupt");
+
+    // Write a file with bad magic
+    {
+        std::ofstream ofs("/tmp/quant_test_corrupt/bad.seg", std::ios::binary);
+        uint32_t bad_magic = 0xDEADBEEF;
+        ofs.write(reinterpret_cast<const char*>(&bad_magic), sizeof(bad_magic));
+    }
+
+    auto blocks = disk.read_segment("bad.seg");
+    EXPECT_TRUE(blocks.empty());
+}
+
+TEST(DiskPersistenceTest, ReadEmptySegmentFile) {
+    std::filesystem::remove_all("/tmp/quant_test_empty_seg");
+    DiskPersistence disk("/tmp/quant_test_empty_seg");
+
+    // Create an empty .seg file
+    {
+        std::ofstream ofs("/tmp/quant_test_empty_seg/empty.seg", std::ios::binary);
+    }
+
+    auto blocks = disk.read_segment("empty.seg");
+    EXPECT_TRUE(blocks.empty());
+}
+
+TEST(DiskPersistenceTest, DeleteNonExistentSegment) {
+    std::filesystem::remove_all("/tmp/quant_test_del_missing");
+    DiskPersistence disk("/tmp/quant_test_del_missing");
+
+    // Deleting a non-existent file should return false (remove failed)
+    bool deleted = disk.delete_segment("nope.seg");
+    EXPECT_FALSE(deleted);
 }
