@@ -52,26 +52,27 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
         node_output_port[edge.from_node] = edge.from_port;
     }
 
-    // Load kline data
-    storage::TimeRange range{params.start_time, params.end_time};
-    auto close_result = storage_.query_kline(params.symbol, params.kline_type,
-                                              storage::DataField::kClose, range);
-    auto ts_result = storage_.query_kline(params.symbol, params.kline_type,
-                                           storage::DataField::kTimestamp, range);
+    // Load kline data via new KlineRow API
+    auto klines = storage_.query_kline(params.symbol, static_cast<uint8_t>(params.kline_type),
+                                        params.start_time, params.end_time);
+    if (klines.empty()) return {};
 
-    if (close_result.values.empty()) return {};
+    size_t num_bars = klines.size();
 
-    size_t num_bars = close_result.values.size();
+    // Extract per-field arrays for factor computation (convert int32×10000 → double)
+    std::vector<double> close_vals, open_vals, high_vals, low_vals, vol_vals, ts_vals;
+    close_vals.reserve(num_bars); open_vals.reserve(num_bars);
+    high_vals.reserve(num_bars); low_vals.reserve(num_bars);
+    vol_vals.reserve(num_bars); ts_vals.reserve(num_bars);
 
-    // Load other price fields for factor computation
-    auto open_result = storage_.query_kline(params.symbol, params.kline_type,
-                                             storage::DataField::kOpen, range);
-    auto high_result = storage_.query_kline(params.symbol, params.kline_type,
-                                             storage::DataField::kHigh, range);
-    auto low_result = storage_.query_kline(params.symbol, params.kline_type,
-                                            storage::DataField::kLow, range);
-    auto vol_result = storage_.query_kline(params.symbol, params.kline_type,
-                                            storage::DataField::kVolume, range);
+    for (const auto& k : klines) {
+        ts_vals.push_back(static_cast<double>(k.timestamp));
+        open_vals.push_back(static_cast<double>(k.open_price) / 10000.0);
+        high_vals.push_back(static_cast<double>(k.high_price) / 10000.0);
+        low_vals.push_back(static_cast<double>(k.low_price) / 10000.0);
+        close_vals.push_back(static_cast<double>(k.close_price) / 10000.0);
+        vol_vals.push_back(static_cast<double>(k.volume));
+    }
 
     portfolio::Portfolio portfolio(params.initial_cash);
     SimulatedBroker broker;
@@ -100,15 +101,15 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
         // Build input data for factors up to current bar
         std::unordered_map<std::string, std::vector<double>> input_data;
         input_data["price"] = std::vector<double>(
-            close_result.values.begin(), close_result.values.begin() + i + 1);
+            close_vals.begin(), close_vals.begin() + i + 1);
         input_data["open"] = std::vector<double>(
-            open_result.values.begin(), open_result.values.begin() + i + 1);
+            open_vals.begin(), open_vals.begin() + i + 1);
         input_data["high"] = std::vector<double>(
-            high_result.values.begin(), high_result.values.begin() + i + 1);
+            high_vals.begin(), high_vals.begin() + i + 1);
         input_data["low"] = std::vector<double>(
-            low_result.values.begin(), low_result.values.begin() + i + 1);
+            low_vals.begin(), low_vals.begin() + i + 1);
         input_data["volume"] = std::vector<double>(
-            vol_result.values.begin(), vol_result.values.begin() + i + 1);
+            vol_vals.begin(), vol_vals.begin() + i + 1);
 
         // Compute factors in topological order
         for (auto fid : topo) {
@@ -162,9 +163,9 @@ BacktestResult BacktestRunner::run(const ir::StrategyGraph& graph,
             }
         }
 
-        double current_price = close_result.values[i];
-        int64_t ts = (i < ts_result.values.size())
-                         ? static_cast<int64_t>(ts_result.values[i])
+        double current_price = close_vals[i];
+        int64_t ts = (i < ts_vals.size())
+                         ? static_cast<int64_t>(ts_vals[i])
                          : static_cast<int64_t>(i);
 
         // Invoke signal handlers

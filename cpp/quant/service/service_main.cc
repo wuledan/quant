@@ -118,9 +118,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "[Service] WARNING: etcd is not available at "
                   << "http://127.0.0.1:2379 — strategy/backtest config will not sync\n";
     }
-    folly::coro::co_withExecutor(
-        global_exec.executor(),
-        strategy_watcher.start()).start().detach();
+    std::move(strategy_watcher.start()).scheduleOn(global_exec.executor()).start();
     std::cout << "[Service] StrategyWatcher started (etcd endpoint=http://127.0.0.1:2379)\n";
 
     // ── 5. Create SchedulerService and start it ──
@@ -156,9 +154,7 @@ int main(int argc, char* argv[]) {
             .cold_threshold_days = 30,
             .remove_after_upload = false,
         });
-    folly::coro::co_withExecutor(
-        global_exec.executor(),
-        cold_daemon.run()).start().detach();
+    cold_daemon.run().scheduleOn(global_exec.executor()).start();
     std::cout << "[Service] ColdUploadDaemon started (threshold=30d, scan_interval=1h)\n";
 
     // ── 7. Create BacktestRunner and StrategyApi ──
@@ -207,7 +203,7 @@ int main(int argc, char* argv[]) {
 
     // ── 8. Wait for shutdown signal ──
     if (!g_shutdown_requested) {
-        infra::blockingWait(g_shutdown_baton.co_wait());
+        infra::blockingWait(g_shutdown_baton);
     }
 
     // ── Graceful shutdown ──
