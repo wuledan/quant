@@ -28,7 +28,13 @@ bool StrategyEngine::activate(uint64_t strategy_id) {
     if (!entry) return false;
     if (active_.count(strategy_id)) return false;
 
-    // Load IR graph (with exception guard for missing/corrupt files)
+    // Require a valid graph path — strategies registered without one cannot be activated
+    if (entry->graph_path.empty()) {
+        std::cerr << "[StrategyEngine] Strategy '" << entry->name
+                  << "' has no graph_path, cannot activate\n";
+        return false;
+    }
+
     ir::StrategyGraph graph;
     try {
         graph = ir::StrategyGraph::load_from_file(entry->graph_path);
