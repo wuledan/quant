@@ -77,7 +77,7 @@ const MarketData: React.FC = () => {
 
       // Fetch factors
       try {
-        const fr = await fetch(`${API_BASE}/factors/compute?symbol=${sym}`, { method: 'POST' });
+        const fr = await fetch(`${API_BASE}/factors/compute?symbol=${sym}&${params}`, { method: 'POST' });
         if (fr.ok) {
           const fj = await fr.json();
           setFactors(fj.factors || {});

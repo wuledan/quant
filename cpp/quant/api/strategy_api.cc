@@ -314,7 +314,27 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
             i = amp + 1;
         }
         if (sym.empty()) return error_response(400, "Missing symbol");
-        auto rows = storage_.query_kline(sym, 7, 0, INT64_MAX);
+        // Parse date range from query to match kline data window
+        int64_t f_start = 0, f_end = INT64_MAX;
+        auto f_parse_date = [](const std::string& s) -> int64_t {
+            if (s.size() < 10) return 0;
+            struct tm tm = {};
+            tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+            tm.tm_mon = std::stoi(s.substr(5, 2)) - 1;
+            tm.tm_mday = std::stoi(s.substr(8, 2));
+            return static_cast<int64_t>(timegm(&tm)) * 1'000'000;
+        };
+        for (size_t j = 0; j + 6 < query.size(); ) {
+            size_t eq = query.find('=', j), amp = query.find('&', eq);
+            if (eq == std::string::npos) break;
+            std::string key = query.substr(j, eq - j);
+            std::string val = query.substr(eq + 1, amp == std::string::npos ? query.size() - eq - 1 : amp - eq - 1);
+            if (key == "start_date") f_start = f_parse_date(val);
+            if (key == "end_date") f_end = f_parse_date(val) + 86400LL * 1'000'000;
+            if (amp == std::string::npos) break;
+            j = amp + 1;
+        }
+        auto rows = storage_.query_kline(sym, 7, f_start, f_end);
         if (rows.empty()) return error_response(404, "No data for symbol");
 
         // Build input data vector
