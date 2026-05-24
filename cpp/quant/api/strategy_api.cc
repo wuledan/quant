@@ -1191,6 +1191,36 @@ ApiResponse StrategyApi::handle_symbols() {
                  "000001.SH","000300.SH","399001.SZ","399006.SZ"};
     }
     std::sort(codes.begin(), codes.end());
+    // Load stock name mapping from symbol_names.json
+    static std::unordered_map<std::string, std::string> s_name_map;
+    static bool s_name_loaded = false;
+    if (!s_name_loaded) {
+        std::ifstream nf("data/symbol_names.json");
+        if (nf.good()) {
+            std::string line;
+            while (std::getline(nf, line)) {
+                size_t c1 = line.find("\"");
+                if (c1 == std::string::npos) continue;
+                size_t c2 = line.find("\"", c1 + 1);
+                if (c2 == std::string::npos) continue;
+                std::string k = line.substr(c1 + 1, c2 - c1 - 1);
+                size_t v1 = line.find("\"", c2 + 1);
+                if (v1 == std::string::npos) continue;
+                size_t v2 = line.find("\"", v1 + 1);
+                if (v2 == std::string::npos) continue;
+                s_name_map[k] = line.substr(v1 + 1, v2 - v1 - 1);
+            }
+            nf.close();
+        }
+        s_name_loaded = true;
+    }
+    auto stock_name = [](const std::string& c) {
+        std::string bare = c;
+        size_t d = bare.find(".");
+        if (d != std::string::npos) bare = bare.substr(0, d);
+        auto it = s_name_map.find(bare);
+        return it != s_name_map.end() ? it->second : c;
+    };
 
     for (size_t i = 0; i < codes.size(); ++i) {
         auto& code = codes[i];
@@ -1202,7 +1232,7 @@ ApiResponse StrategyApi::handle_symbols() {
         }
         w.begin_obj();
         w.key("symbol"); w.str_val(symbol); w.comma();
-        w.key("name"); w.str_val(code); w.comma();
+        w.key("name"); w.str_val(stock_name(code)); w.comma();
         w.key("exchange"); w.str_val(
             symbol.find(".SH") != std::string::npos ? "SH" : "SZ");
         w.end_obj();
