@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
+#include <cctype>
+#include <dirent.h>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -1164,18 +1167,46 @@ ApiResponse StrategyApi::handle_symbols() {
     JsonWriter w;
     w.begin_arr();
 
-    const char* syms[] = {"000001.SZ", "000002.SZ", "300750.SZ",
-                          "600519.SH", "000001.SH", "000300.SH",
-                          "399001.SZ", "399006.SZ"};
-    static const size_t n = sizeof(syms) / sizeof(syms[0]);
-    for (size_t i = 0; i < n; ++i) {
+    // Dynamically scan CSV directory for loaded symbols
+    std::vector<std::string> codes;
+    DIR* dir = ::opendir("data/csv_daily");
+    if (dir) {
+        struct dirent* entry;
+        while ((entry = ::readdir(dir)) != nullptr) {
+            std::string name(entry->d_name);
+            if (name.size() > 4 && name.substr(name.size() - 4) == ".csv") {
+                std::string code = name.substr(0, name.size() - 4);
+                // Normalize: "000001_SH" → "000001.SH", "600519" → "600519"
+                size_t us = code.find('_');
+                if (us != std::string::npos) {
+                    code = code.substr(0, us) + "." + code.substr(us + 1);
+                }
+                codes.push_back(code);
+            }
+        }
+        ::closedir(dir);
+    }
+    if (codes.empty()) {
+        codes = {"000001.SZ","000002.SZ","300750.SZ","600519.SH",
+                 "000001.SH","000300.SH","399001.SZ","399006.SZ"};
+    }
+    std::sort(codes.begin(), codes.end());
+
+    for (size_t i = 0; i < codes.size(); ++i) {
+        auto& code = codes[i];
+        std::string symbol = code;
+        // Add exchange suffix if bare 6-digit code
+        if (code.size() == 6
+            && std::all_of(code.begin(), code.end(), ::isdigit)) {
+            symbol += (code[0] == '6' || code[0] == '5') ? ".SH" : ".SZ";
+        }
         w.begin_obj();
-        w.key("symbol"); w.str_val(syms[i]); w.comma();
-        w.key("name"); w.str_val(syms[i]); w.comma();
+        w.key("symbol"); w.str_val(symbol); w.comma();
+        w.key("name"); w.str_val(code); w.comma();
         w.key("exchange"); w.str_val(
-            std::string(syms[i]).find(".SH") != std::string::npos ? "SH" : "SZ");
+            symbol.find(".SH") != std::string::npos ? "SH" : "SZ");
         w.end_obj();
-        if (i + 1 < n) w.comma();
+        if (i + 1 < codes.size()) w.comma();
     }
 
     w.end_arr();
