@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dayjs from 'dayjs';
-import { Card, Col, Row, Tag, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
+import { AutoComplete, Card, Col, Row, Tag, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons';
 import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
@@ -225,14 +225,27 @@ const MarketData: React.FC = () => {
 
       <Card style={{ marginBottom: 16 }}>
         <Space wrap size="middle">
-          <Input.Search
-            placeholder="输入股票代码 如 000001.SZ"
-            style={{ width: 220 }}
+          <AutoComplete
+            style={{ width: 280 }}
             value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            onSearch={handleSearch}
-            enterButton={<SearchOutlined />}
-          />
+            onChange={(v) => setSearchText(v)}
+            onSelect={(v) => { setSymbol(v); fetchData(v); }}
+            onSearch={setSearchText}
+            options={allSymbols
+              .filter(s => {
+                const q = searchText.toUpperCase();
+                return s.symbol.includes(q) || s.name.toUpperCase().includes(q);
+              })
+              .slice(0, 15)
+              .map(s => ({
+                value: s.symbol,
+                label: `${s.symbol}  ${s.name}`,
+              }))
+            }
+            placeholder="输入股票代码或名称，如 000001.SZ / 平安银行"
+            allowClear
+          />{" "}
+          <SearchOutlined onClick={() => { searchText && handleSearch(); }} style={{ fontSize: 18, cursor: 'pointer', color: '#1677ff' }} />
           <RangePicker
             placeholder={['开始日期', '结束日期']}
             onChange={handleDateRangeChange as any}
@@ -242,8 +255,8 @@ const MarketData: React.FC = () => {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
           {hotTags.map(s => (
             <Tag key={s.symbol} style={{ cursor: 'pointer' }}
-              onClick={() => { setSymbol(s.symbol); fetchData(s.symbol); }}>
-              {s.symbol}
+              onClick={() => { setSymbol(s.symbol); setSearchText(s.symbol); fetchData(s.symbol); }}>
+              {s.name || s.symbol}
             </Tag>
           ))}
         </div>
