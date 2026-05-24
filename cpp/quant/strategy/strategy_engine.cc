@@ -1,5 +1,6 @@
 // strategy_engine.cc — Strategy engine implementation
 #include "cpp/quant/strategy/strategy_engine.h"
+#include <iostream>
 
 #include "cpp/quant/event/event_bus.h"
 #include "cpp/quant/execution/order_manager.h"
@@ -27,8 +28,15 @@ bool StrategyEngine::activate(uint64_t strategy_id) {
     if (!entry) return false;
     if (active_.count(strategy_id)) return false;
 
-    // Load IR graph
-    auto graph = ir::StrategyGraph::load_from_file(entry->graph_path);
+    // Load IR graph (with exception guard for missing/corrupt files)
+    ir::StrategyGraph graph;
+    try {
+        graph = ir::StrategyGraph::load_from_file(entry->graph_path);
+    } catch (const std::exception& e) {
+        std::cerr << "[StrategyEngine] Failed to load graph '" << entry->graph_path
+                  << "': " << e.what() << "\n";
+        return false;
+    }
 
     // Build factor DAG
     factor::OpRegistry::register_all_builtin_ops();

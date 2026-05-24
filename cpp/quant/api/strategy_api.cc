@@ -665,7 +665,7 @@ ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) 
                 } else if (k == "symbol") {
                     params.symbol = p.parse_string();
                 } else if (k == "kline_type") {
-                    params.kline_type = static_cast<uint8_t>(p.parse_number());
+                    params.kline_type = static_cast<int>(p.parse_number());
                 } else {
                     p.skip_value();
                 }
