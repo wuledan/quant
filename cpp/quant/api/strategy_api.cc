@@ -9,9 +9,11 @@
 #include <stdexcept>
 
 #include "cpp/quant/backtest/backtest_runner.h"
+#include "cpp/quant/factor/built_in_factors.h"
 #include "cpp/quant/infra/logging/logger.h"
 #include "cpp/quant/ir/ir_graph.h"
 #include "cpp/quant/storage/column_block.h"
+#include "cpp/quant/storage/factor_store.h"
 #include "cpp/quant/storage/storage_engine.h"
 #include "cpp/quant/strategy/strategy_engine.h"
 #include "cpp/quant/strategy/strategy_registry.h"
@@ -344,29 +346,53 @@ ApiResponse StrategyApi::handle_request(const std::string& method,
             volumes.push_back(static_cast<double>(r.volume));
         }
 
-        // Compute basic technical indicators
+        // Compute factors using BuiltInFactors (standard path, same as strategy_runner)
+        auto sma5  = factor::BuiltInFactors::ma(close_prices, 5);
+        auto sma10 = factor::BuiltInFactors::ma(close_prices, 10);
+        auto sma20 = factor::BuiltInFactors::ma(close_prices, 20);
+        auto sma60 = factor::BuiltInFactors::ma(close_prices, 60);
+        auto ema10 = factor::BuiltInFactors::ema(close_prices, 10);
+        auto ema30 = factor::BuiltInFactors::ema(close_prices, 30);
+        auto rsi14 = factor::BuiltInFactors::rsi(close_prices, 14);
+
+        // Write to FactorStore for caching (if available)
+        if (factor_store_) {
+            for (size_t i = 0; i < rows.size(); ++i) {
+                int64_t t = rows[i].timestamp;
+                if (i < sma5.size())  factor_store_->put_factor(t, sym, "SMA_5",  sma5[i]);
+                if (i < sma10.size()) factor_store_->put_factor(t, sym, "SMA_10", sma10[i]);
+                if (i < sma20.size()) factor_store_->put_factor(t, sym, "SMA_20", sma20[i]);
+                if (i < sma60.size()) factor_store_->put_factor(t, sym, "SMA_60", sma60[i]);
+                if (i < ema10.size()) factor_store_->put_factor(t, sym, "EMA_10", ema10[i]);
+                if (i < ema30.size()) factor_store_->put_factor(t, sym, "EMA_30", ema30[i]);
+                if (i < rsi14.size()) factor_store_->put_factor(t, sym, "RSI_14", rsi14[i]);
+            }
+        }
+
+        // Serialize JSON
         JsonWriter w;
         w.begin_obj();
+
+        auto write_factor_arr = [&](const std::string& name,
+                                     const std::vector<double>& vals) {
+            w.key(name); w.begin_arr();
+            for (size_t i = 0; i < vals.size(); ++i) {
+                w.num_val(vals[i]);
+                if (i + 1 < vals.size()) w.comma();
+            }
+            w.end_arr(); w.comma();
+        };
         w.key("symbol"); w.str_val(sym); w.comma();
         w.key("bars"); w.int_val(static_cast<int64_t>(rows.size())); w.comma();
         w.key("factors"); w.begin_obj();
 
-        auto compute_ma = [&](int period) {
-            w.key("SMA_" + std::to_string(period)); w.begin_arr();
-            double sum = 0;
-            for (size_t i = 0; i < close_prices.size(); ++i) {
-                sum += close_prices[i];
-                if (i >= static_cast<size_t>(period)) sum -= close_prices[i - period];
-                w.num_val(i >= static_cast<size_t>(period - 1) ? sum / period : 0);
-                if (i + 1 < close_prices.size()) w.comma();
-            }
-            w.end_arr(); w.comma();
-        };
-
-        compute_ma(5);
-        compute_ma(10);
-        compute_ma(20);
-        compute_ma(60);
+        write_factor_arr("SMA_5",  sma5);
+        write_factor_arr("SMA_10", sma10);
+        write_factor_arr("SMA_20", sma20);
+        write_factor_arr("SMA_60", sma60);
+        write_factor_arr("EMA_10", ema10);
+        write_factor_arr("EMA_30", ema30);
+        write_factor_arr("RSI_14", rsi14);
 
         w.key("bars"); w.int_val(static_cast<int64_t>(rows.size()));
         w.end_obj(); w.comma();
@@ -554,6 +580,15 @@ ApiResponse StrategyApi::register_strategy(const std::string& body) {
         ofs.close();
     }
 
+    // Auto-detect graph file from data/graphs/ when no path provided
+    if (graph_path.empty()) {
+        std::string auto_path = "data/graphs/" + name + ".graph";
+        std::ifstream test(auto_path);
+        if (test.good()) {
+            graph_path = auto_path;
+        }
+    }
+
     auto id = engine_.registry().register_strategy(name, graph_path, params);
     auto* entry = engine_.registry().find(id);
     if (!entry) {
@@ -656,6 +691,16 @@ ApiResponse StrategyApi::pause_strategy(uint64_t id) {
     return success_response(entry_to_json(*updated));
 }
 
+// ── Date string "YYYY-MM-DD" → epoch microseconds ──
+static int64_t parse_date_to_epoch(const std::string& s) {
+    if (s.size() < 10) return 0;
+    struct tm tm = {};
+    tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+    tm.tm_mon = std::stoi(s.substr(5, 2)) - 1;
+    tm.tm_mday = std::stoi(s.substr(8, 2));
+    return static_cast<int64_t>(timegm(&tm)) * 1'000'000;
+}
+
 ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) {
     auto* entry = engine_.registry().find(id);
     if (!entry) {
@@ -676,17 +721,39 @@ ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) 
                 auto k = p.next_key();
                 if (k.empty()) break;
                 p.expect(':');
-                if (k == "initial_cash") {
-                    params.initial_cash = p.parse_number();
-                } else if (k == "start_time") {
-                    params.start_time = static_cast<int64_t>(p.parse_number());
-                } else if (k == "end_time") {
-                    params.end_time = static_cast<int64_t>(p.parse_number());
-                } else if (k == "symbol") {
+                // Frontend format: symbol as array
+                if (k == "symbols") {
+                    p.expect('[');
+                    if (p.peek() != ']') params.symbol = p.parse_string();
+                    while (p.peek() == ',') { p.next(); p.parse_string(); }
+                    p.expect(']');
+                }
+                // Legacy format: single symbol string
+                else if (k == "symbol") {
                     params.symbol = p.parse_string();
-                } else if (k == "kline_type") {
-                    params.kline_type = static_cast<int>(p.parse_number());
-                } else {
+                }
+                // Frontend format: date string "YYYY-MM-DD"
+                else if (k == "start_date") {
+                    params.start_time = parse_date_to_epoch(p.parse_string());
+                }
+                else if (k == "end_date") {
+                    params.end_time = parse_date_to_epoch(p.parse_string())
+                                      + 86400LL * 1'000'000;
+                }
+                // Legacy format: epoch microseconds
+                else if (k == "start_time") {
+                    params.start_time = static_cast<int64_t>(p.parse_number());
+                }
+                else if (k == "end_time") {
+                    params.end_time = static_cast<int64_t>(p.parse_number());
+                }
+                else if (k == "initial_cash") {
+                    params.initial_cash = p.parse_number();
+                }
+                else if (k == "kline_type") {
+                    params.kline_type = static_cast<uint8_t>(p.parse_number());
+                }
+                else {
                     p.skip_value();
                 }
             }
@@ -704,23 +771,14 @@ ApiResponse StrategyApi::trigger_backtest(uint64_t id, const std::string& body) 
         return error_response(500, std::string("Backtest failed: ") + e.what());
     }
 
-    // Build response with strategy_id and result
-    std::string result_json = result_to_json(result);
-
     // Record history entry
     BacktestHistoryEntry hist_entry;
     hist_entry.timestamp = std::time(nullptr);
-    hist_entry.result_json = result_json;
+    hist_entry.result_json = result_to_json(result);
     history_[id].insert(history_[id].begin(), std::move(hist_entry));
 
-    JsonWriter w;
-    w.begin_obj();
-    w.key("strategy_id"); w.int_val(static_cast<int64_t>(id)); w.comma();
-    w.key("result");
-    w.os << result_json;
-    w.end_obj();
-
-    return success_response(w.os.str());
+    // Return flat result JSON (frontend accesses total_return, sharpe_ratio etc. directly)
+    return success_response(result_to_json(result));
 }
 
 // ── Batch backtest ──

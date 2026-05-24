@@ -43,7 +43,16 @@ const Backtest: React.FC = () => {
     try {
       const res = await fetch(`${API_BASE}/strategy/list`);
       const data = await res.json();
-      setStrategies(data.strategies || []);
+      // Backend returns a JSON array of {id, name, graph_path, status, ...}
+      if (Array.isArray(data)) {
+        setStrategies(data.map((s: { id: number; name: string }) => ({
+          id: String(s.id),
+          name: s.name,
+          type: '',
+        })));
+      } else {
+        setStrategies(data?.strategies || []);
+      }
     } catch {
       setStrategies([
         { id: 'strat-001', name: '均线交叉策略', type: 'ma_cross' },

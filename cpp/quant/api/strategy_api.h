@@ -8,7 +8,7 @@
 #include "cpp/quant/backtest/backtest_runner.h"
 #include "cpp/quant/strategy/strategy_registry.h"
 
-namespace quant::storage { class StorageEngine; }
+namespace quant::storage { class FactorStore; class StorageEngine; }
 namespace quant::strategy { class StrategyEngine; }
 
 namespace quant::api {
@@ -58,12 +58,16 @@ private:
                              const std::string& query);
     ApiResponse handle_symbols();
 
+    // Set optional FactorStore for caching computed factor values
+    void set_factor_store(storage::FactorStore* store) noexcept { factor_store_ = store; }
+
     std::string entry_to_json(const strategy::StrategyEntry& entry);
     std::string result_to_json(const backtest::BacktestResult& result);
 
     strategy::StrategyEngine& engine_;
     backtest::BacktestRunner& runner_;
     storage::StorageEngine& storage_;
+    storage::FactorStore* factor_store_ = nullptr;
 
     // key: strategy_id, value: list of history entries (newest first)
     std::unordered_map<uint64_t, std::vector<BacktestHistoryEntry>> history_;

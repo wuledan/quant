@@ -112,6 +112,26 @@ EtcdClient::get_prefix(const std::string& prefix) {
 //   value1\n
 //   key2\n
 //   value2\n
+//
+// Values may be multi-line JSON (e.g. IR graphs). We handle this by
+// tracking brace depth: if a value line starts with '{', we continue
+// reading until braces balance.
+
+static std::string read_value(std::istringstream& input) {
+    std::string line;
+    if (!std::getline(input, line)) return "";
+    if (line.empty() || line[0] != '{') return line;  // single-line value
+
+    // Multi-line JSON: read until braces balance
+    std::string value = line;
+    int depth = 0;
+    for (char c : line) { if (c == '{') depth++; if (c == '}') depth--; }
+    while (depth > 0 && std::getline(input, line)) {
+        for (char c : line) { if (c == '{') depth++; if (c == '}') depth--; }
+        value += "\n" + line;
+    }
+    return value;
+}
 
 std::vector<std::pair<std::string, std::string>>
 EtcdClient::parse_get_output(const std::string& output) {
@@ -123,10 +143,8 @@ EtcdClient::parse_get_output(const std::string& output) {
     while (std::getline(stream, line)) {
         if (line.empty()) continue;
         std::string key = line;
-        std::string value;
-        if (std::getline(stream, value)) {
-            result.emplace_back(std::move(key), std::move(value));
-        }
+        std::string value = read_value(stream);
+        result.emplace_back(std::move(key), std::move(value));
     }
 
     return result;
