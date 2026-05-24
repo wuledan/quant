@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dayjs from 'dayjs';
-import { Card, Col, Row, Select, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
+import { Card, Col, Row, Tag, Spin, Typography, Statistic, Empty, Space, DatePicker, Button, message, Input } from 'antd';
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons';
 import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts';
 import type { IChartApi, Time } from 'lightweight-charts';
@@ -19,18 +19,10 @@ interface KlinePoint {
   amount: number;
 }
 
-const popularSymbols = [
-  { label: '沪深300', value: '000300.SH' },
-  { label: '上证指数', value: '000001.SH' },
-  { label: '深证成指', value: '399001.SZ' },
-  { label: '创业板指', value: '399006.SZ' },
-  { label: '贵州茅台', value: '600519.SH' },
-  { label: '宁德时代', value: '300750.SZ' },
-  { label: '中国平安', value: '601318.SH' },
-  { label: '招商银行', value: '600036.SH' },
-  { label: '比亚迪', value: '002594.SZ' },
-  { label: '中芯国际', value: '688981.SH' },
-];
+interface SymbolInfo {
+  symbol: string;
+  name: string;
+}
 
 const MarketData: React.FC = () => {
   const [symbol, setSymbol] = useState<string>('000300.SH');
@@ -41,6 +33,7 @@ const MarketData: React.FC = () => {
   const [showFactors, setShowFactors] = useState<Record<string, boolean>>({ SMA_5: true, SMA_10: true, SMA_20: true, SMA_60: false });
   const [dateRange, setDateRange] = useState<[string, string]>(['2024-01-01', '']);
   const [lastUpdate, setLastUpdate] = useState<string>('');
+  const [allSymbols, setAllSymbols] = useState<SymbolInfo[]>([]);
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -113,6 +106,14 @@ const MarketData: React.FC = () => {
     }
   };
 
+  // Fetch available symbols
+  useEffect(() => {
+    fetch(`${API_BASE}/symbols`)
+      .then(r => r.json())
+      .then(d => { if (Array.isArray(d)) setAllSymbols(d); })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetchData(symbol);
     const timer = setInterval(() => fetchData(symbol), 120000);
@@ -131,8 +132,8 @@ const MarketData: React.FC = () => {
     if (data.length === 0) return;
 
     const chart = createChart(chartContainerRef.current, {
-      layout: { background: { color: 'transparent' }, textColor: '#333' },
-      grid: { vertLines: { color: '#e8e8e8' }, horzLines: { color: '#e8e8e8' } },
+      layout: { background: { color: '#ffffff' }, textColor: '#333' },
+      grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
       width: chartContainerRef.current.clientWidth,
       height: 500,
       rightPriceScale: { borderColor: '#d9d9d9' },
@@ -163,14 +164,18 @@ const MarketData: React.FC = () => {
     );
 
     // Add factor overlay lines (visible when showFactors[key] is true)
-    const factorColors: Record<string, string> = {
-      SMA_5: '#1677ff', SMA_10: '#fa8c16', SMA_20: '#722ed1', SMA_60: '#eb2f96',
+    const factorColors: Record<string, {color: string; width: number}> = {
+      SMA_5:  { color: '#FF6B35', width: 2 },
+      SMA_10: { color: '#00C9A7', width: 2 },
+      SMA_20: { color: '#C77DFF', width: 2 },
+      SMA_60: { color: '#FFD166', width: 2 },
     };
     Object.entries(factors).forEach(([name, values]) => {
       if (showFactors[name] && values.length > 0) {
+        const fc = factorColors[name];
         const lineSeries = chart.addSeries(LineSeries, {
-          color: factorColors[name] || '#52c41a',
-          lineWidth: 1,
+          color: fc?.color || '#52c41a',
+          lineWidth: fc?.width || 2,
           priceLineVisible: false,
           lastValueVisible: false,
         });
@@ -208,7 +213,8 @@ const MarketData: React.FC = () => {
     ? ((latest.close - first.close) / first.close * 100)
     : 0;
 
-  const symbolLabel = popularSymbols.find(s => s.value === symbol)?.label || symbol;
+  const hotTags = allSymbols.slice(0, 8);
+  const symbolLabel = allSymbols.find(s => s.symbol === symbol)?.name || symbol;
 
   return (
     <div>
@@ -219,17 +225,8 @@ const MarketData: React.FC = () => {
 
       <Card style={{ marginBottom: 16 }}>
         <Space wrap size="middle">
-          <Select
-            showSearch
-            style={{ width: 200 }}
-            value={symbol}
-            onChange={(v) => { setSymbol(v); fetchData(v); }}
-            options={popularSymbols}
-            placeholder="选择标的"
-            filterOption={(input, option) => (option?.label ?? '').includes(input) || (option?.value ?? '').includes(input)}
-          />
           <Input.Search
-            placeholder="输入股票代码 如 600519"
+            placeholder="输入股票代码 如 000001.SZ"
             style={{ width: 220 }}
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
@@ -242,6 +239,14 @@ const MarketData: React.FC = () => {
           />
           <Button icon={<ReloadOutlined />} onClick={() => fetchData(symbol)}>刷新</Button>
         </Space>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+          {hotTags.map(s => (
+            <Tag key={s.symbol} style={{ cursor: 'pointer' }}
+              onClick={() => { setSymbol(s.symbol); fetchData(s.symbol); }}>
+              {s.symbol}
+            </Tag>
+          ))}
+        </div>
       </Card>
 
       {loading ? (
