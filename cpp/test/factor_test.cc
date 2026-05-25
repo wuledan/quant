@@ -598,5 +598,78 @@ TEST(FactorComputerTest, ConcurrentCacheReadWrite) {
     for (auto& t : threads) t.join();
 }
 
+// ── DAG multi-core parallel compute test ──
+
+TEST(FactorComputerTest, ParallelWaveCompute) {
+    using quant::infra::WorkStealingExecutor;
+    using quant::infra::blockingWait;
+
+    // Register 4 independent SMA factors — they all read "close" and produce "value"
+    auto registry = std::make_unique<FactorRegistry>();
+
+    std::vector<double> close_prices(1000);
+    for (size_t i = 0; i < 1000; ++i) close_prices[i] = 100.0 + i * 0.01;
+
+    for (int period : {5, 10, 20, 60}) {
+        FactorMeta meta;
+        meta.name = "SMA_" + std::to_string(period);
+        meta.inputs = {"close"};
+        meta.outputs = {"value"};
+
+        int p = period;
+        auto compute_fn = [p](const std::unordered_map<std::string,
+                                std::vector<double>>& input) {
+            auto it = input.find("price");
+            if (it == input.end()) it = input.find("close");
+            const auto& prices = it->second;
+            std::vector<double> result(prices.size(), 0.0);
+            double sum = 0;
+            for (size_t i = 0; i < prices.size(); ++i) {
+                sum += prices[i];
+                if (static_cast<int>(i) >= p) sum -= prices[i - p];
+                if (static_cast<int>(i) >= p - 1) result[i] = sum / p;
+            }
+            return std::unordered_map<std::string, std::vector<double>>{
+                {"value", std::move(result)}
+            };
+        };
+
+        registry->register_factor(std::move(meta), compute_fn);
+    }
+
+    auto dag = std::make_unique<FactorDAG>(registry.get());
+    dag->build();
+    ASSERT_TRUE(dag->is_built());
+
+    auto levels = dag->parallel_levels();
+    // 4 factors all depend only on "close" data → single wave
+    EXPECT_EQ(levels.size(), 1u);
+    EXPECT_EQ(levels[0].size(), 4u);
+
+    // Setup executor and run parallel compute
+    WorkStealingExecutor executor(4, "test-parallel");
+    executor.start();
+
+    FactorComputer computer(std::move(registry), std::move(dag));
+
+    std::unordered_map<std::string, std::vector<double>> input_data;
+    input_data["close"] = close_prices;
+    input_data["price"] = close_prices;  // both names for compatibility
+
+    auto result = blockingWait(computer.co_compute_all(input_data, executor));
+
+    ASSERT_TRUE(result.success) << result.error_msg;
+    EXPECT_GE(result.outputs.size(), 1u);
+
+    // Verify executor processed tasks (from global_queue since test thread
+    // is not a pool worker). In production, StrategyRunner runs on a worker
+    // thread → tasks go to local_deque → stolen by idle workers.
+    auto stats = executor.stats();
+    EXPECT_GT(stats.tasks_completed, 0u);
+
+    executor.stop();
+}
+
 }  // namespace
 }  // namespace quant::factor
+// -- placeholder to force rebuild --
