@@ -12,6 +12,8 @@
 #include "cpp/quant/factor/factor_dag.h"
 #include "cpp/quant/factor/factor_registry.h"
 
+namespace quant::infra { class WorkStealingExecutor; }
+
 namespace quant::factor {
 
 // ── Compute result ──
@@ -32,9 +34,16 @@ public:
     FactorComputer(const FactorComputer&) = delete;
     FactorComputer& operator=(const FactorComputer&) = delete;
 
-    // Full compute: evaluate all factors topologically
+    // Full compute: evaluate all factors topologically (sync, single-threaded)
     ComputeResult compute_all(
         const std::unordered_map<std::string, std::vector<double>>& input_data);
+
+    // Parallel compute: evaluate factors with true multi-core Wave parallelism.
+    // Each wave's factors go into local_deque → stolen by idle workers,
+    // suspended coroutines retain thread affinity via add_to_worker.
+    infra::CoTask<ComputeResult> co_compute_all(
+        const std::unordered_map<std::string, std::vector<double>>& input_data,
+        infra::WorkStealingExecutor& executor);
 
     // Compute a specific factor and its dependencies
     ComputeResult compute_factor(

@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
+
+#include "cpp/quant/infra/work_stealing_executor.h"
 
 namespace quant::factor {
 
@@ -49,6 +52,81 @@ ComputeResult FactorComputer::compute_all(
     result.compute_time_ns = std::chrono::duration_cast<
         std::chrono::nanoseconds>(end - start).count();
     return result;
+}
+
+// ── Parallel compute (multi-core aware, Wave-based) ──
+
+infra::CoTask<ComputeResult> FactorComputer::co_compute_all(
+    const std::unordered_map<std::string, std::vector<double>>& input_data,
+    infra::WorkStealingExecutor& executor) {
+    ComputeResult result;
+    auto start = std::chrono::high_resolution_clock::now();
+
+    dag_->build();
+    auto validation = dag_->validate();
+    if (!validation.valid) {
+        result.success = false;
+        result.error_msg = "DAG validation failed: " + validation.message;
+        co_return result;
+    }
+
+    auto waves = dag_->parallel_levels();
+    std::unordered_set<FactorId> computed;
+
+    for (auto& level : waves) {
+        if (level.size() == 1) {
+            // Single factor: run inline (no executor overhead)
+            auto sub = compute_factor_impl(level[0], input_data, &computed);
+            if (!sub.success) {
+                result.success = false;
+                result.error_msg = sub.error_msg;
+                co_return result;
+            }
+            for (auto& [k, v] : sub.outputs)
+                result.outputs[k] = std::move(v);
+        } else {
+            // Multiple factors in this wave: parallel via executor->add()
+            // Since we're on a worker thread, tasks go to local_deque.
+            // Idle workers steal from us → true multi-core concurrency.
+            // Suspended coroutines retain thread affinity via add_to_worker.
+            std::atomic<size_t> done_count{0};
+            size_t n = level.size();
+            std::vector<ComputeResult> wave_results(n);
+
+            for (size_t j = 0; j < n; ++j) {
+                FactorId id = level[j];
+                executor.add([&, j, id]() {
+                    std::unordered_set<FactorId> local = computed;
+                    wave_results[j] = compute_factor_impl(id, input_data, &local);
+                    done_count.fetch_add(1, std::memory_order_release);
+                });
+            }
+
+            // Spin-wait: tasks run on other workers or our own deque,
+            // we yield CPU while waiting
+            while (done_count.load(std::memory_order_acquire) < n) {
+                // Brief PAUSE spin: other workers are computing factors,
+                // tasks are microsecond-level so this is a short wait.
+                asm volatile("pause");
+            }
+
+            for (auto& wr : wave_results) {
+                if (!wr.success) {
+                    result.success = false;
+                    result.error_msg = wr.error_msg;
+                    co_return result;
+                }
+                for (auto& [k, v] : wr.outputs)
+                    result.outputs[k] = std::move(v);
+            }
+        }
+    }
+
+    result.success = true;
+    auto end = std::chrono::high_resolution_clock::now();
+    result.compute_time_ns = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(end - start).count();
+    co_return result;
 }
 
 ComputeResult FactorComputer::compute_factor(
