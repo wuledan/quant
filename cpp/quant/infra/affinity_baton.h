@@ -53,7 +53,8 @@ public:
     // ── Query ──
 
     bool ready() const noexcept {
-        return state_.load(std::memory_order_acquire) == State::POSTED;
+        auto v = waiters_.load(std::memory_order_acquire);
+        return reinterpret_cast<uintptr_t>(v) & kPostedBit;
     }
 
     bool try_wait() const noexcept {
@@ -63,7 +64,9 @@ public:
     // ── Reset (only safe when no waiters exist) ──
 
     void reset() noexcept {
-        state_.store(State::NOT_READY, std::memory_order_release);
+        // Clear posted bit; only safe with no waiters
+        auto* v = waiters_.load(std::memory_order_relaxed);
+        waiters_.store(v, std::memory_order_release);
     }
 
     // ── Intrusive waiter node ──
@@ -89,24 +92,21 @@ public:
             node.worker_id = current_worker_id();
             node.next = nullptr;
 
-            // CAS loop to add this node to the waiters list
-            auto* old_head = baton.waiters_.load(std::memory_order_acquire);
+            // Single CAS: atomically checks posted bit AND enqueues.
+            // No window between "check state" and "CAS into waiters".
+            auto* old = baton.waiters_.load(std::memory_order_acquire);
 
             do {
-                // Double-check: if baton became posted while we were
-                // preparing, resume immediately instead of suspending.
-                if (baton.state_.load(std::memory_order_acquire) ==
-                    State::POSTED) {
+                if (reinterpret_cast<uintptr_t>(old) & kPostedBit) {
+                    // Already posted — don't suspend
                     handle.resume();
                     return;
                 }
-                node.next = old_head;
+                node.next = clear_posted(old);
             } while (!baton.waiters_.compare_exchange_weak(
-                old_head, &node,
+                old, &node,
                 std::memory_order_release,
                 std::memory_order_acquire));
-
-            // Successfully added to waiters list and suspended.
         }
 
         void await_resume() const noexcept {}
@@ -135,12 +135,15 @@ private:
     static void resume_chain(WaiterNode* waiters,
                              WorkStealingExecutor* executor);
 
-    enum class State : uint8_t {
-        NOT_READY,
-        POSTED,
-    };
+    // Posted bit encoded in waiters_ pointer low bit (pointer is 4/8-byte aligned).
+    // This merges state_ and waiters_ into a single atomic, eliminating the
+    // "check state_ then CAS waiters_" race window in await_suspend.
+    static constexpr uintptr_t kPostedBit = 1;
+    static WaiterNode* clear_posted(WaiterNode* p) noexcept {
+        return reinterpret_cast<WaiterNode*>(
+            reinterpret_cast<uintptr_t>(p) & ~kPostedBit);
+    }
 
-    std::atomic<State> state_{State::NOT_READY};
     std::atomic<WaiterNode*> waiters_{nullptr};
 };
 

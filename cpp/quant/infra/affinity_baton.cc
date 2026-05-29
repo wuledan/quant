@@ -31,20 +31,23 @@ size_t AffinityBaton::current_worker_id() {
 // ── post(executor): routed resume ──
 
 void AffinityBaton::post(WorkStealingExecutor& executor) {
-    // Atomically drain the entire waiter chain
-    auto* waiters = waiters_.exchange(nullptr, std::memory_order_acq_rel);
-    state_.store(State::POSTED, std::memory_order_release);
+    // Atomically swap waiters_ to kPostedBit (drain list + set posted).
+    // Single atomic operation — no window between "drain" and "set state".
+    auto* old = waiters_.exchange(
+        reinterpret_cast<WaiterNode*>(kPostedBit),
+        std::memory_order_acq_rel);
 
-    resume_chain(waiters, &executor);
+    resume_chain(clear_posted(old), &executor);
 }
 
 // ── post_direct(): inline resume (no executor) ──
 
 void AffinityBaton::post_direct() noexcept {
-    auto* waiters = waiters_.exchange(nullptr, std::memory_order_acq_rel);
-    state_.store(State::POSTED, std::memory_order_release);
+    auto* old = waiters_.exchange(
+        reinterpret_cast<WaiterNode*>(kPostedBit),
+        std::memory_order_acq_rel);
 
-    resume_chain(waiters, nullptr);
+    resume_chain(clear_posted(old), nullptr);
 }
 
 // ── resume_chain: walk the linked list and resume each waiter ──
